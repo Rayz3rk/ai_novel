@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+server/data.json
+settings/settings.csv
+npm-debug.log*
+.codex-*.log
+.codex*.log
+*.log
+*.out
+*.err
+server/*.log
+server/*.out
+server/*.err

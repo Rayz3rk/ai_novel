@@ -14,3 +14,6 @@ server/*.out
 server/*.err
 backup/
 scripts/
+src/styles.css
+docs/项目报告.md
+docs/论文稿.md

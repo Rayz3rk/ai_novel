@@ -37,6 +37,7 @@ const id = (prefix) =>
   `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 const buildProjectDeleteCode = (projectId) =>
   `DEL-${projectId.replace(/^project_/, "").slice(-6).toUpperCase().padStart(6, "0")}`;
+const maskDatabaseUrl = (value) => value.replace(/:\/\/([^:]+):([^@]+)@/, "://$1:***@");
 
 function normalizeAiProvider(value, fallback = "local") {
   const next = String(value || "").trim().toLowerCase();
@@ -626,7 +627,9 @@ function toProject(row) {
     foreshadows: [],
     reports: [],
     ioLogs: [],
-    generationSessions: []
+    generationSessions: [],
+    storyStateEvents: [],
+    storyStateSummary: null
   };
 }
 
@@ -743,6 +746,426 @@ function toGenerationSession(row) {
     updatedAt: row.updated_at,
     committedAt: row.committed_at || null
   };
+}
+
+function toStoryStateEvent(row) {
+  return {
+    id: row.id,
+    chapterId: row.chapter_id,
+    chapterNumber: row.chapter_number,
+    chapterTitle: row.chapter_title,
+    source: row.source,
+    summary: row.summary || "",
+    stateDiff: row.state_diff || {},
+    stateSnapshot: row.state_snapshot || {},
+    impactSummary: row.impact_summary || {},
+    createdAt: row.created_at
+  };
+}
+
+function normalizeReferenceTokens(value, limit = 8) {
+  const items = Array.isArray(value)
+    ? value
+    : String(value || "").split(/[、,，；;\/|\s]+/);
+  const seen = new Set();
+
+  return items
+    .map((item) => String(item || "").trim())
+    .filter((item) => item.length >= 2 && !seen.has(item) && seen.add(item))
+    .slice(0, limit);
+}
+
+function buildStoryPreview(text, limit = 88) {
+  const compact = String(text || "").replace(/\s+/g, " ").trim();
+  if (!compact) return "";
+  return compact.length > limit ? `${compact.slice(0, limit)}...` : compact;
+}
+
+function parseChapterNumberLabel(value) {
+  const match = String(value || "").match(/第\s*(\d+)\s*章/);
+  return match ? Number(match[1]) || 0 : 0;
+}
+
+function buildProjectWithChapter(project, nextChapter) {
+  const chapterExists = project.chapters.some((item) => item.id === nextChapter.id);
+  const chapters = chapterExists
+    ? project.chapters.map((item) => (item.id === nextChapter.id ? { ...item, ...nextChapter } : item))
+    : [...project.chapters, nextChapter];
+
+  return {
+    ...project,
+    chapters: [...chapters].sort((left, right) => {
+      const numberDiff = (Number(left.number) || 0) - (Number(right.number) || 0);
+      if (numberDiff !== 0) return numberDiff;
+      return String(left.createdAt || "").localeCompare(String(right.createdAt || ""));
+    })
+  };
+}
+
+function buildStoryStateSummaryText(chapter, content) {
+  return mergeWorkflowLists(
+    chapter.goal ? [`目标推进：${buildStoryPreview(chapter.goal, 42)}`] : [],
+    chapter.conflict ? [`冲突变化：${buildStoryPreview(chapter.conflict, 42)}`] : [],
+    chapter.hook ? [`尾钩压力：${buildStoryPreview(chapter.hook, 42)}`] : [],
+    content ? [`正文片段：${buildStoryPreview(content, 56)}`] : []
+  )
+    .slice(0, 3)
+    .join(" | ");
+}
+
+function collectMentionedSettings(project, chapter, combinedText) {
+  const selectedIds = new Set(normalizeSelectedSettingIds(chapter.selectedSettingIds, project));
+  return sortSettings(project.settings)
+    .filter((setting) => selectedIds.has(setting.id) || combinedText.includes(setting.name))
+    .slice(0, 8)
+    .map((setting) => ({
+      settingId: setting.id,
+      name: setting.name,
+      type: setting.type,
+      reason: selectedIds.has(setting.id) ? "selected_for_chapter" : "mentioned_in_text"
+    }));
+}
+
+function inferRelationshipKind(text) {
+  if (/合作|联手|并肩|结盟|信任|守住|保护/.test(text)) return "alliance";
+  if (/怀疑|对峙|背叛|仇|敌意|冲突|威胁|逼迫/.test(text)) return "tension";
+  if (/秘密|真相|身份|揭开|发现|暴露|映出/.test(text)) return "reveal";
+  return "focus";
+}
+
+function collectRelationshipSignals(project, combinedText) {
+  const characters = sortSettings(project.settings).filter((item) => item.type === "character");
+  const signals = [];
+
+  for (let index = 0; index < characters.length; index += 1) {
+    for (let nestedIndex = index + 1; nestedIndex < characters.length; nestedIndex += 1) {
+      const left = characters[index];
+      const right = characters[nestedIndex];
+      if (!combinedText.includes(left.name) || !combinedText.includes(right.name)) continue;
+
+      signals.push({
+        pair: [left.name, right.name],
+        kind: inferRelationshipKind(combinedText),
+        reason: buildStoryPreview(combinedText, 48)
+      });
+    }
+  }
+
+  return signals.slice(0, 4);
+}
+
+function collectForeshadowProgress(project, chapter, combinedText) {
+  const chapterNumber = Number(chapter.number) || 0;
+
+  return (project.foreshadows || [])
+    .filter((item) => item.status !== "已回收")
+    .map((item) => {
+      const relatedTokens = normalizeReferenceTokens(item.related, 6);
+      const touched =
+        combinedText.includes(item.content) ||
+        relatedTokens.some((token) => combinedText.includes(token));
+      const expectedChapter = parseChapterNumberLabel(item.expectedPayoff);
+      const nearingPayoff = expectedChapter > 0 && chapterNumber >= Math.max(expectedChapter - 1, 1);
+
+      if (!touched && !nearingPayoff) return null;
+
+      return {
+        foreshadowId: item.id,
+        content: buildStoryPreview(item.content, 42),
+        status: touched ? "touched" : "payoff_pressure",
+        reason: touched
+          ? buildStoryPreview(item.related || item.content, 42)
+          : `预计在第 ${expectedChapter} 章附近回收`
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 5);
+}
+
+function collectWorldRuleMentions(project, activatedSettings) {
+  const activatedIds = new Set(activatedSettings.map((item) => item.settingId));
+  return sortSettings(project.settings)
+    .filter((setting) => activatedIds.has(setting.id) && setting.rules)
+    .slice(0, 4)
+    .map((setting) => ({
+      settingId: setting.id,
+      name: setting.name,
+      rule: buildStoryPreview(setting.rules, 52)
+    }));
+}
+
+function buildStoryCarryovers(chapter, foreshadowProgress, relationshipSignals, worldRuleMentions) {
+  return mergeWorkflowLists(
+    chapter.hook ? [`延续尾钩：${buildStoryPreview(chapter.hook, 40)}`] : [],
+    foreshadowProgress
+      .filter((item) => item.status === "touched")
+      .map((item) => `继续处理伏笔：${item.content}`),
+    relationshipSignals
+      .filter((item) => item.kind !== "focus")
+      .map((item) => `承接关系变化：${item.pair.join(" / ")} (${item.kind})`),
+    worldRuleMentions.map((item) => `别丢规则代价：${item.name}`)
+  ).slice(0, 5);
+}
+
+function collectAffectedChapterRefs(project, chapter, activatedSettings, foreshadowProgress) {
+  const activatedIds = new Set(activatedSettings.map((item) => item.settingId));
+  const touchedForeshadows = new Set(foreshadowProgress.map((item) => item.foreshadowId));
+
+  return project.chapters
+    .filter((item) => item.id !== chapter.id)
+    .map((item) => {
+      const reasons = [];
+      const selectedIds = new Set(item.selectedSettingIds || []);
+      const sharedSettingCount = [...selectedIds].filter((settingId) => activatedIds.has(settingId)).length;
+
+      if (sharedSettingCount > 0) {
+        reasons.push(`共享 ${sharedSettingCount} 个设定锚点`);
+      }
+
+      if (
+        touchedForeshadows.size > 0 &&
+        project.foreshadows.some(
+          (foreshadow) =>
+            touchedForeshadows.has(foreshadow.id) &&
+            (foreshadow.plantedChapter === `第 ${item.number} 章` ||
+              foreshadow.expectedPayoff === `第 ${item.number} 章`)
+        )
+      ) {
+        reasons.push("与当前伏笔回收路径相连");
+      }
+
+      if (!reasons.length) return null;
+
+      return {
+        chapterId: item.id,
+        chapterNumber: item.number,
+        chapterTitle: item.title,
+        reason: reasons.join("；"),
+        score: sharedSettingCount * 2 + reasons.length
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => right.score - left.score || left.chapterNumber - right.chapterNumber)
+    .slice(0, 4)
+    .map(({ score: _score, ...item }) => item);
+}
+
+function buildStoryPressureWarnings(project, chapter, activatedSettings, foreshadowProgress, relationshipSignals) {
+  const warnings = [];
+  const activeForeshadows = project.foreshadows.filter((item) => item.status !== "已回收").length;
+
+  if (!activatedSettings.some((item) => item.type === "character")) {
+    warnings.push("这一章没有稳定锚定核心角色，后续追读黏性可能偏弱。");
+  }
+  if (activeForeshadows >= 4) {
+    warnings.push(`当前仍有 ${activeForeshadows} 条未回收伏笔，下一章最好安排一次小回收。`);
+  }
+  if (chapter.hook && !foreshadowProgress.some((item) => item.status === "touched")) {
+    warnings.push("本章新增尾钩，但没有同步带出旧伏笔，后续章节要留意堆积。");
+  }
+  if (relationshipSignals.length >= 3) {
+    warnings.push("本章关系线变化较多，下一章需要选一条主线继续推进。");
+  }
+
+  return warnings.slice(0, 4);
+}
+
+function buildStoryStateEvent(project, chapter, { source = "save" } = {}) {
+  const combinedText = [
+    chapter.title,
+    chapter.goal,
+    chapter.conflict,
+    chapter.hook,
+    chapter.content
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const activatedSettings = collectMentionedSettings(project, chapter, combinedText);
+  const relationshipSignals = collectRelationshipSignals(project, combinedText);
+  const foreshadowProgress = collectForeshadowProgress(project, chapter, combinedText);
+  const worldRuleMentions = collectWorldRuleMentions(project, activatedSettings);
+  const carryovers = buildStoryCarryovers(
+    chapter,
+    foreshadowProgress,
+    relationshipSignals,
+    worldRuleMentions
+  );
+  const affectedChapters = collectAffectedChapterRefs(
+    project,
+    chapter,
+    activatedSettings,
+    foreshadowProgress
+  );
+  const risks = buildStoryPressureWarnings(
+    project,
+    chapter,
+    activatedSettings,
+    foreshadowProgress,
+    relationshipSignals
+  );
+
+  return {
+    id: id("state"),
+    projectId: project.id,
+    chapterId: chapter.id,
+    chapterNumber: Number(chapter.number) || 0,
+    chapterTitle: chapter.title || "",
+    source,
+    summary: buildStoryStateSummaryText(chapter, chapter.content),
+    stateDiff: {
+      activatedSettings,
+      relationshipSignals,
+      foreshadowProgress,
+      worldRuleMentions,
+      carryovers
+    },
+    stateSnapshot: {
+      activeCharacterIds: activatedSettings
+        .filter((item) => item.type === "character")
+        .map((item) => item.settingId),
+      activeSettingIds: activatedSettings.map((item) => item.settingId),
+      unresolvedForeshadowIds: project.foreshadows
+        .filter((item) => item.status !== "已回收")
+        .map((item) => item.id),
+      focusLabels: activatedSettings.map((item) => item.name).slice(0, 6),
+      relationshipFocus: relationshipSignals.map((item) => item.pair.join(" / "))
+    },
+    impactSummary: {
+      affectedSettings: activatedSettings.map(({ settingId, name, type, reason }) => ({
+        settingId,
+        name,
+        type,
+        reason
+      })),
+      affectedChapters,
+      nextChapterPressure: carryovers,
+      risks
+    },
+    createdAt: now()
+  };
+}
+
+function buildProjectStoryStateSummary(project) {
+  const latestEventsByChapter = new Map();
+
+  for (const event of project.storyStateEvents || []) {
+    if (!latestEventsByChapter.has(event.chapterId)) {
+      latestEventsByChapter.set(event.chapterId, event);
+    }
+  }
+
+  const latestEvents = [...latestEventsByChapter.values()];
+  const latestChapterNumber = project.chapters.reduce(
+    (max, chapter) => Math.max(max, Number(chapter.number) || 0),
+    0
+  );
+
+  const activeEntities = sortSettings(project.settings)
+    .map((setting) => {
+      const touchedEvents = latestEvents.filter((event) =>
+        (event.stateSnapshot?.activeSettingIds || []).includes(setting.id)
+      );
+      if (!touchedEvents.length) return null;
+
+      const lastEvent = touchedEvents.sort(
+        (left, right) => (Number(right.chapterNumber) || 0) - (Number(left.chapterNumber) || 0)
+      )[0];
+      const chapterGap = latestChapterNumber - (Number(lastEvent.chapterNumber) || 0);
+
+      return {
+        settingId: setting.id,
+        name: setting.name,
+        type: setting.type,
+        mentionCount: touchedEvents.length,
+        lastChapterNumber: lastEvent.chapterNumber,
+        heat: chapterGap <= 1 ? "hot" : chapterGap <= 3 ? "warm" : "cool",
+        latestReason:
+          lastEvent.stateDiff?.activatedSettings?.find((item) => item.settingId === setting.id)?.reason ||
+          "mentioned_in_state"
+      };
+    })
+    .filter(Boolean)
+    .sort(
+      (left, right) =>
+        (Number(right.lastChapterNumber) || 0) - (Number(left.lastChapterNumber) || 0) ||
+        right.mentionCount - left.mentionCount
+    )
+    .slice(0, 10);
+
+  const relationshipMap = new Map();
+  for (const event of latestEvents) {
+    for (const signal of event.stateDiff?.relationshipSignals || []) {
+      const key = [...signal.pair].sort().join("::");
+      const current = relationshipMap.get(key);
+      if (!current || Number(event.chapterNumber) > Number(current.lastChapterNumber || 0)) {
+        relationshipMap.set(key, {
+          pair: signal.pair,
+          kind: signal.kind,
+          reason: signal.reason,
+          lastChapterNumber: event.chapterNumber
+        });
+      }
+    }
+  }
+
+  const foreshadowBoard = (project.foreshadows || []).map((item) => {
+    const touchedEvent = latestEvents.find((event) =>
+      (event.stateDiff?.foreshadowProgress || []).some(
+        (progress) => progress.foreshadowId === item.id && progress.status === "touched"
+      )
+    );
+
+    return {
+      id: item.id,
+      content: item.content,
+      status: item.status,
+      plantedChapter: item.plantedChapter,
+      expectedPayoff: item.expectedPayoff,
+      lastTouchedChapterNumber: touchedEvent?.chapterNumber || 0
+    };
+  });
+
+  return {
+    latestEvent: project.storyStateEvents?.[0] || null,
+    activeEntities,
+    relationshipThreads: [...relationshipMap.values()]
+      .sort((left, right) => (Number(right.lastChapterNumber) || 0) - (Number(left.lastChapterNumber) || 0))
+      .slice(0, 8),
+    foreshadowBoard,
+    carryovers: mergeWorkflowLists(
+      ...(project.storyStateEvents || [])
+        .slice(0, 3)
+        .map((event) => event.impactSummary?.nextChapterPressure || [])
+    ).slice(0, 8),
+    pressureWarnings: mergeWorkflowLists(
+      ...(project.storyStateEvents || []).slice(0, 2).map((event) => event.impactSummary?.risks || [])
+    ).slice(0, 6)
+  };
+}
+
+async function insertStoryStateEvent(client, event) {
+  await client.query(
+    `INSERT INTO story_state_events (
+      id, project_id, chapter_id, chapter_number, chapter_title, source, summary,
+      state_diff, state_snapshot, impact_summary, created_at
+    ) VALUES (
+      $1, $2, $3, $4, $5, $6, $7,
+      $8::jsonb, $9::jsonb, $10::jsonb, $11
+    )`,
+    [
+      event.id,
+      event.projectId,
+      event.chapterId,
+      event.chapterNumber,
+      event.chapterTitle,
+      event.source,
+      event.summary,
+      JSON.stringify(event.stateDiff || {}),
+      JSON.stringify(event.stateSnapshot || {}),
+      JSON.stringify(event.impactSummary || {}),
+      event.createdAt || now()
+    ]
+  );
 }
 
 function toAiProfile(row) {
@@ -939,6 +1362,20 @@ async function initDb() {
       committed_at TIMESTAMPTZ
     );
 
+    CREATE TABLE IF NOT EXISTS story_state_events (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      chapter_id TEXT NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+      chapter_number INTEGER NOT NULL DEFAULT 0,
+      chapter_title TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT 'save',
+      summary TEXT NOT NULL DEFAULT '',
+      state_diff JSONB NOT NULL DEFAULT '{}'::jsonb,
+      state_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+      impact_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
     CREATE INDEX IF NOT EXISTS idx_settings_project ON settings(project_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_project_type_number
       ON settings(project_id, type, category_number);
@@ -950,6 +1387,10 @@ async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_ai_profiles_updated ON ai_profiles(updated_at DESC, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_generation_sessions_project_updated
       ON generation_sessions(project_id, status, updated_at DESC, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_story_state_project_created
+      ON story_state_events(project_id, created_at DESC, chapter_number DESC);
+    CREATE INDEX IF NOT EXISTS idx_story_state_chapter_created
+      ON story_state_events(chapter_id, created_at DESC);
   `);
 
   await pool.query(`
@@ -1045,6 +1486,8 @@ async function initDb() {
   if (rows[0].count === 0) {
     await insertSeedData();
   }
+
+  await backfillStoryStateEvents();
 }
 
 async function insertSeedData() {
@@ -1188,6 +1631,7 @@ async function readData() {
     reportsResult,
     ioLogsResult,
     generationSessionsResult,
+    storyStateEventsResult,
     aiConfigState
   ] = await Promise.all([
     pool.query("SELECT * FROM projects ORDER BY created_at DESC"),
@@ -1200,6 +1644,7 @@ async function readData() {
     pool.query(
       "SELECT * FROM generation_sessions WHERE status = 'pending' ORDER BY updated_at DESC, created_at DESC LIMIT 48"
     ),
+    pool.query("SELECT * FROM story_state_events ORDER BY created_at DESC, chapter_number DESC"),
     readAiConfigState()
   ]);
 
@@ -1238,6 +1683,14 @@ async function readData() {
     projectsById.get(row.project_id)?.generationSessions.push(toGenerationSession(row));
   }
 
+  for (const row of storyStateEventsResult.rows) {
+    projectsById.get(row.project_id)?.storyStateEvents.push(toStoryStateEvent(row));
+  }
+
+  for (const project of projects) {
+    project.storyStateSummary = buildProjectStoryStateSummary(project);
+  }
+
   return {
     projects,
     aiConfig: aiConfigState
@@ -1247,6 +1700,110 @@ async function readData() {
 async function readProject(projectId) {
   const data = await readData();
   return findProject(data, projectId);
+}
+
+async function probeExistingApiServer(listenPort) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1200);
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${listenPort}/api/state`, {
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      return false;
+    }
+
+    const payload = await response.json();
+    return Boolean(payload && Array.isArray(payload.projects) && payload.aiConfig);
+  } catch (_error) {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function holdProcessForReusedServer(listenPort) {
+  console.log(`API port ${listenPort} is already in use. Reusing the existing AI Novel Studio server.`);
+  console.log(`Existing API: http://localhost:${listenPort}`);
+  return new Promise(() => {});
+}
+
+async function startApiServer() {
+  return await new Promise((resolve, reject) => {
+    const server = app.listen(port);
+    let settled = false;
+
+    server.once("listening", () => {
+      settled = true;
+      console.log(`AI Novel Studio API running at http://localhost:${port}`);
+      console.log(`PostgreSQL storage: ${maskDatabaseUrl(databaseUrl)}`);
+      resolve(server);
+    });
+
+    server.once("error", async (error) => {
+      if (settled) return;
+
+      if (error.code === "EADDRINUSE") {
+        const canReuse = await probeExistingApiServer(port);
+        if (canReuse) {
+          console.log(`PostgreSQL storage: ${maskDatabaseUrl(databaseUrl)}`);
+          resolve(await holdProcessForReusedServer(port));
+          return;
+        }
+      }
+
+      reject(error);
+    });
+  });
+}
+
+async function backfillStoryStateEvents() {
+  const result = await pool.query(`
+    SELECT c.project_id, c.id AS chapter_id
+    FROM chapters c
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM story_state_events s
+      WHERE s.chapter_id = c.id
+    )
+    ORDER BY c.project_id ASC, c.number ASC, c.created_at ASC
+  `);
+
+  if (!result.rowCount) return;
+
+  const chaptersByProject = new Map();
+  for (const row of result.rows) {
+    const list = chaptersByProject.get(row.project_id) || [];
+    list.push(row.chapter_id);
+    chaptersByProject.set(row.project_id, list);
+  }
+
+  for (const [projectId, chapterIds] of chaptersByProject.entries()) {
+    const project = await readProject(projectId);
+    const client = await pool.connect();
+
+    try {
+      await client.query("BEGIN");
+      for (const chapterId of chapterIds) {
+        const chapter = project.chapters.find((item) => item.id === chapterId);
+        if (!chapter) continue;
+
+        await insertStoryStateEvent(
+          client,
+          buildStoryStateEvent(project, chapter, {
+            source: "backfill"
+          })
+        );
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
 }
 
 function findProject(data, projectId) {
@@ -3589,6 +4146,7 @@ async function commitGenerationSession(projectId, sessionId, options = {}) {
     }
   };
   const client = await pool.connect();
+  let persistedChapterState = null;
 
   try {
     await client.query("BEGIN");
@@ -3642,6 +4200,26 @@ async function commitGenerationSession(projectId, sessionId, options = {}) {
       });
 
       await client.query("UPDATE projects SET status = $1 WHERE id = $2", ["连载中", projectId]);
+      persistedChapterState = {
+        id: persist.chapterId,
+        number: Number(persist.chapterNumber || workflow.chapterNumber),
+        title: nextTitle,
+        goal: persist.goal || "",
+        conflict: persist.conflict || "",
+        hook: persist.hook || "",
+        tone: persist.tone || project.defaultTone,
+        wordCount: Number(persist.wordCount || 1800),
+        selectedSettingIds,
+        beats,
+        content: finalContent,
+        draftTitle: nextTitle,
+        draftTone: persist.tone || project.defaultTone,
+        draftContent: finalContent,
+        draftSavedAt: savedAt,
+        updatedAt: savedAt,
+        createdAt: savedAt,
+        versions: []
+      };
     } else {
       const chapter = findChapter(project, persist.chapterId);
       const current = getChapterEditorState(chapter, project);
@@ -3687,6 +4265,34 @@ async function commitGenerationSession(projectId, sessionId, options = {}) {
           persist.chapterId,
           projectId
         ]
+      );
+
+      persistedChapterState = {
+        ...chapter,
+        title: nextTitle,
+        goal: persist.goal || chapter.goal || "",
+        conflict: persist.conflict || chapter.conflict || "",
+        hook: persist.hook || chapter.hook || "",
+        tone: persist.tone || chapter.tone || project.defaultTone,
+        wordCount: Number(persist.wordCount || chapter.wordCount || 1800),
+        selectedSettingIds,
+        beats,
+        content: finalContent,
+        draftTitle: nextTitle,
+        draftTone: persist.tone || chapter.tone || project.defaultTone,
+        draftContent: finalContent,
+        draftSavedAt: savedAt,
+        updatedAt: savedAt
+      };
+    }
+
+    if (persistedChapterState) {
+      const nextProject = buildProjectWithChapter(project, persistedChapterState);
+      await insertStoryStateEvent(
+        client,
+        buildStoryStateEvent(nextProject, persistedChapterState, {
+          source: persist.mode === "generate" ? "generate_commit" : "regenerate_commit"
+        })
       );
     }
 
@@ -4710,6 +5316,27 @@ app.post(
           ]
         );
 
+        const nextTitle = request.body.title?.trim() ?? current.title;
+        const nextTone = normalizeTone(request.body.tone, current.tone);
+        const persistedChapterState = {
+          ...chapter,
+          title: nextTitle,
+          tone: nextTone,
+          content: nextContent,
+          draftTitle: nextTitle,
+          draftTone: nextTone,
+          draftContent: nextContent,
+          draftSavedAt: savedAt,
+          updatedAt: savedAt
+        };
+        const nextProject = buildProjectWithChapter(project, persistedChapterState);
+        await insertStoryStateEvent(
+          client,
+          buildStoryStateEvent(nextProject, persistedChapterState, {
+            source: "rewrite_apply"
+          })
+        );
+
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");
@@ -5116,27 +5743,61 @@ app.post(
       const chapter = findChapter(project, request.params.chapterId);
       const current = getChapterEditorState(chapter, project);
       const savedAt = now();
+      const nextTitle = request.body.title?.trim() ?? current.title;
+      const nextTone = normalizeTone(request.body.tone, current.tone);
+      const nextContent =
+        typeof request.body.content === "string" ? request.body.content : current.content;
+      const client = await pool.connect();
 
-      await pool.query(
-        `UPDATE chapters
-         SET title = $1,
-             tone = $2,
-             content = $3,
-             draft_title = $1,
-             draft_tone = $2,
-             draft_content = $3,
-             draft_saved_at = $4,
-             updated_at = $4
-         WHERE id = $5 AND project_id = $6`,
-        [
-          request.body.title?.trim() ?? current.title,
-          normalizeTone(request.body.tone, current.tone),
-          typeof request.body.content === "string" ? request.body.content : current.content,
-          savedAt,
-          request.params.chapterId,
-          request.params.projectId
-        ]
-      );
+      try {
+        await client.query("BEGIN");
+        await client.query(
+          `UPDATE chapters
+           SET title = $1,
+               tone = $2,
+               content = $3,
+               draft_title = $1,
+               draft_tone = $2,
+               draft_content = $3,
+               draft_saved_at = $4,
+               updated_at = $4
+           WHERE id = $5 AND project_id = $6`,
+          [
+            nextTitle,
+            nextTone,
+            nextContent,
+            savedAt,
+            request.params.chapterId,
+            request.params.projectId
+          ]
+        );
+
+        const persistedChapterState = {
+          ...chapter,
+          title: nextTitle,
+          tone: nextTone,
+          content: nextContent,
+          draftTitle: nextTitle,
+          draftTone: nextTone,
+          draftContent: nextContent,
+          draftSavedAt: savedAt,
+          updatedAt: savedAt
+        };
+        const nextProject = buildProjectWithChapter(project, persistedChapterState);
+        await insertStoryStateEvent(
+          client,
+          buildStoryStateEvent(nextProject, persistedChapterState, {
+            source: "manual_save"
+          })
+        );
+
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
 
       response.json(await readData());
     } catch (error) {
@@ -5442,16 +6103,15 @@ app.use((error, _request, response, _next) => {
 });
 
 initDb()
-  .then(() => {
-    app.listen(port, () => {
-      console.log(`AI Novel Studio API running at http://localhost:${port}`);
-      console.log(
-        `PostgreSQL storage: ${databaseUrl.replace(/:\/\/([^:]+):([^@]+)@/, "://$1:***@")}`
-      );
-    });
-  })
+  .then(() => startApiServer())
   .catch((error) => {
-    console.error("Failed to initialize PostgreSQL storage.");
-    console.error(error.message);
+    if (error?.code === "EADDRINUSE") {
+      console.error(
+        `Port ${port} is already in use by another service that does not look like AI Novel Studio.`
+      );
+    } else {
+      console.error("Failed to initialize PostgreSQL storage.");
+      console.error(error.message);
+    }
     process.exit(1);
   });

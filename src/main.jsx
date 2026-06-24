@@ -2174,6 +2174,7 @@ function App() {
             <TabButton active={activeTab === "studio"} onClick={() => setActiveTab("studio")} icon={Gauge} label="创作台" />
             <TabButton active={activeTab === "bible"} onClick={() => setActiveTab("bible")} icon={Library} label="设定库" />
             <TabButton active={activeTab === "chapters"} onClick={() => setActiveTab("chapters")} icon={FileText} label="章节生成" />
+            <TabButton active={activeTab === "state"} onClick={() => setActiveTab("state")} icon={Clock3} label="故事状态" />
             <TabButton
               active={false}
               onClick={() => {
@@ -2257,6 +2258,9 @@ function App() {
             openChapterEditorPage={openChapterEditorPage}
             openBlankChapterEditorPage={openBlankChapterEditorPage}
           />
+        )}
+        {activeProject && !hasLeafPage && activeTab === "state" && (
+          <StoryStateTab project={activeProject} />
         )}
         {activeProject && !hasLeafPage && activeTab === "threads" && (
           <ThreadsTab project={activeProject} mutate={mutate} working={working} />
@@ -2710,6 +2714,9 @@ function StudioTab({ project, request, mutate, streamEvents, working, setActiveT
   const unresolvedThreads = project.foreshadows.filter((item) => item.status !== "已回收").length;
   const characterCount = project.settings.filter((item) => item.type === "character").length;
   const ioLogCount = project.ioLogs?.length || 0;
+  const stateSummary = project.storyStateSummary || {};
+  const activeStateCount = stateSummary.activeEntities?.length || 0;
+  const carryoverCount = stateSummary.carryovers?.length || 0;
 
   return (
     <section className="content-grid studio-grid">
@@ -2730,6 +2737,10 @@ function StudioTab({ project, request, mutate, streamEvents, working, setActiveT
           <Wand2 size={17} />
           润色/修改正文
         </button>
+        <button onClick={() => setActiveTab("state")}>
+          <Clock3 size={17} />
+          看故事状态
+        </button>
         <button onClick={() => setActiveTab("io")}>
           <BrainCircuit size={17} />
           看 I/O 记录
@@ -2741,6 +2752,8 @@ function StudioTab({ project, request, mutate, streamEvents, working, setActiveT
         <div className="metric"><span>设定资产</span><strong>{project.settings.length}</strong></div>
         <div className="metric"><span>角色卡</span><strong>{characterCount}</strong></div>
         <div className="metric"><span>未回收伏笔</span><strong>{unresolvedThreads}</strong></div>
+        <div className="metric"><span>活跃状态锚点</span><strong>{activeStateCount}</strong></div>
+        <div className="metric"><span>待承接压力</span><strong>{carryoverCount}</strong></div>
         <div className="metric"><span>I/O 记录</span><strong>{ioLogCount}</strong></div>
       </div>
 
@@ -2756,6 +2769,17 @@ function StudioTab({ project, request, mutate, streamEvents, working, setActiveT
       </div>
 
       <div className="studio-main-column">
+        <div className="panel">
+          <div className="panel-title">
+            <div>
+              <p className="eyebrow">Story State</p>
+              <h2>故事状态图</h2>
+            </div>
+            <Clock3 size={20} />
+          </div>
+          <StoryStateOverview project={project} compact />
+        </div>
+
         <div className="panel">
           <div className="panel-title">
             <div>
@@ -6212,6 +6236,266 @@ function IoLogsTab({ project }) {
         ) : (
           <EmptyState text="还没有 I/O 记录。生成章节、润色、修改或扩写后，这里会自动出现明细。" />
         )}
+      </div>
+    </section>
+  );
+}
+
+function mapStoryStateSourceLabel(source) {
+  if (source === "generate_commit") return "生成入库";
+  if (source === "regenerate_commit") return "重生成入库";
+  if (source === "rewrite_apply") return "改写覆盖";
+  if (source === "manual_save") return "手动保存";
+  if (source === "backfill") return "历史回填";
+  return "状态更新";
+}
+
+function mapRelationshipKindLabel(kind) {
+  if (kind === "alliance") return "结盟";
+  if (kind === "tension") return "对抗";
+  if (kind === "reveal") return "揭示";
+  return "聚焦";
+}
+
+function mapStoryHeatLabel(heat) {
+  if (heat === "hot") return "高热";
+  if (heat === "warm") return "持续";
+  return "待激活";
+}
+
+function StoryStateOverview({ project, compact = false }) {
+  const summary = project.storyStateSummary || {};
+  const latestEvent = summary.latestEvent;
+  const activeEntities = (summary.activeEntities || []).slice(0, compact ? 6 : 10);
+  const relationshipThreads = (summary.relationshipThreads || []).slice(0, compact ? 4 : 8);
+  const carryovers = (summary.carryovers || []).slice(0, compact ? 4 : 8);
+  const pressureWarnings = (summary.pressureWarnings || []).slice(0, compact ? 3 : 6);
+  const foreshadowBoard = (summary.foreshadowBoard || []).slice(0, compact ? 4 : 8);
+
+  if (!latestEvent) {
+    return <EmptyState text="章节入库后会自动生成故事状态 diff、承接压力和影响面。" />;
+  }
+
+  return (
+    <div className="story-state-shell">
+      <div className="story-state-metrics">
+        <div className="metric compact">
+          <span>最近状态更新</span>
+          <strong>第 {latestEvent.chapterNumber} 章</strong>
+        </div>
+        <div className="metric compact">
+          <span>活跃锚点</span>
+          <strong>{summary.activeEntities?.length || 0}</strong>
+        </div>
+        <div className="metric compact">
+          <span>关系线程</span>
+          <strong>{summary.relationshipThreads?.length || 0}</strong>
+        </div>
+        <div className="metric compact">
+          <span>待承接项</span>
+          <strong>{summary.carryovers?.length || 0}</strong>
+        </div>
+      </div>
+
+      <article className="story-state-latest">
+        <header>
+          <div>
+            <span>{mapStoryStateSourceLabel(latestEvent.source)}</span>
+            <strong>第 {latestEvent.chapterNumber} 章 · {latestEvent.chapterTitle}</strong>
+          </div>
+          <small>{formatTime(latestEvent.createdAt)}</small>
+        </header>
+        <p>{latestEvent.summary || "本章状态已更新。"}</p>
+      </article>
+
+      <div className="story-state-grid">
+        <div className="story-state-card">
+          <strong>活跃实体</strong>
+          {activeEntities.length ? (
+            <div className="story-chip-list">
+              {activeEntities.map((item) => (
+                <span key={item.settingId} className={`story-chip ${item.heat || "cool"}`}>
+                  {item.name} · {mapStoryHeatLabel(item.heat)}
+                </span>
+              ))}
+            </div>
+          ) : (
+            <small>暂时没有稳定锚点。</small>
+          )}
+        </div>
+
+        <div className="story-state-card">
+          <strong>关系线程</strong>
+          {relationshipThreads.length ? (
+            <div className="story-line-list">
+              {relationshipThreads.map((item) => (
+                <div key={`${item.pair.join("-")}-${item.lastChapterNumber}`} className="story-line-item">
+                  <span>{item.pair.join(" / ")}</span>
+                  <small>{mapRelationshipKindLabel(item.kind)} · 第 {item.lastChapterNumber} 章</small>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <small>当前没有需要重点承接的关系变化。</small>
+          )}
+        </div>
+
+        <div className="story-state-card">
+          <strong>下一章压力</strong>
+          {carryovers.length ? (
+            <ul className="story-bullet-list">
+              {carryovers.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          ) : (
+            <small>暂时没有明显堆积项。</small>
+          )}
+        </div>
+
+        <div className="story-state-card">
+          <strong>伏笔看板</strong>
+          {foreshadowBoard.length ? (
+            <div className="story-line-list">
+              {foreshadowBoard.map((item) => (
+                <div key={item.id} className="story-line-item">
+                  <span>{summarizeInlineText(item.content, compact ? 28 : 42)}</span>
+                  <small>
+                    {item.status}
+                    {item.lastTouchedChapterNumber ? ` · 最近触达第 ${item.lastTouchedChapterNumber} 章` : ""}
+                  </small>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <small>还没有伏笔状态。</small>
+          )}
+        </div>
+      </div>
+
+      {pressureWarnings.length ? (
+        <div className="story-warning-box">
+          {pressureWarnings.map((item) => (
+            <p key={item}>{item}</p>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function StoryStateTab({ project }) {
+  const events = project.storyStateEvents || [];
+
+  return (
+    <section className="two-column">
+      <div className="panel">
+        <div className="panel-title">
+          <div>
+            <p className="eyebrow">Story Graph</p>
+            <h2>当前故事状态</h2>
+          </div>
+          <Clock3 size={20} />
+        </div>
+        <StoryStateOverview project={project} />
+      </div>
+
+      <div className="panel result-panel">
+        <div className="panel-title">
+          <div>
+            <p className="eyebrow">State Timeline</p>
+            <h2>状态时间线与影响面</h2>
+          </div>
+          <GitBranch size={20} />
+        </div>
+        {events.length ? (
+          <div className="story-event-list">
+            {events.map((event) => (
+              <article className="story-event-card" key={event.id}>
+                <header>
+                  <div>
+                    <span>{mapStoryStateSourceLabel(event.source)}</span>
+                    <strong>第 {event.chapterNumber} 章 · {event.chapterTitle}</strong>
+                  </div>
+                  <small>{formatTime(event.createdAt)}</small>
+                </header>
+                <p>{event.summary || "本章状态已记录。"}</p>
+
+                {(event.stateDiff?.activatedSettings || []).length ? (
+                  <div className="story-event-section">
+                    <strong>触达设定</strong>
+                    <div className="story-chip-list">
+                      {event.stateDiff.activatedSettings.map((item) => (
+                        <span key={`${event.id}-${item.settingId}`} className="story-chip warm">
+                          {item.name}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {(event.stateDiff?.relationshipSignals || []).length ? (
+                  <div className="story-event-section">
+                    <strong>关系变化</strong>
+                    <ul className="story-bullet-list tight">
+                      {event.stateDiff.relationshipSignals.map((item, index) => (
+                        <li key={`${event.id}-rel-${index}`}>
+                          {item.pair.join(" / ")} · {mapRelationshipKindLabel(item.kind)}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+
+                {(event.impactSummary?.nextChapterPressure || []).length ? (
+                  <div className="story-event-section">
+                    <strong>下一章要承接</strong>
+                    <ul className="story-bullet-list tight">
+                      {event.impactSummary.nextChapterPressure.map((item) => (
+                        <li key={`${event.id}-carry-${item}`}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+
+                {(event.impactSummary?.affectedChapters || []).length ? (
+                  <div className="story-event-section">
+                    <strong>受影响章节</strong>
+                    <div className="story-line-list">
+                      {event.impactSummary.affectedChapters.map((item) => (
+                        <div key={`${event.id}-${item.chapterId}`} className="story-line-item">
+                          <span>第 {item.chapterNumber} 章 · {item.chapterTitle}</span>
+                          <small>{item.reason}</small>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {(event.impactSummary?.risks || []).length ? (
+                  <div className="story-warning-box compact">
+                    {event.impactSummary.risks.map((item) => (
+                      <p key={`${event.id}-risk-${item}`}>{item}</p>
+                    ))}
+                  </div>
+                ) : null}
+              </article>
+            ))}
+          </div>
+        ) : (
+          <EmptyState text="故事状态事件会在章节入库、手动保存或覆盖改写后自动出现。" />
+        )}
+      </div>
+
+      <div className="panel wide">
+        <div className="panel-title">
+          <div>
+            <p className="eyebrow">Plot Map</p>
+            <h2>章节地图</h2>
+          </div>
+          <GitBranch size={20} />
+        </div>
+        <PlotMap project={project} />
       </div>
     </section>
   );

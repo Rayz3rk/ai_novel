@@ -4445,26 +4445,31 @@ function ChapterGenerator({
         本章目标
         <textarea value={form.goal} onChange={(event) => setForm({ ...form, goal: event.target.value })} rows={compact ? 3 : 4} placeholder="角色要达成什么、剧情要推进什么。" />
       </label>
-      <label>
+      <label className="generator-conflict-field">
         核心冲突
-        <textarea value={form.conflict} onChange={(event) => setForm({ ...form, conflict: event.target.value })} rows={compact ? 3 : 4} placeholder="阻力、对手、误会、危机或反转。" />
+        <textarea
+          value={form.conflict}
+          onChange={(event) => setForm({ ...form, conflict: event.target.value })}
+          rows={compact ? 6 : 4}
+          placeholder=""
+        />
       </label>
       <div className="form-row">
         <label>
-          章节语气
-          <ToneComposer value={form.tone} onChange={(tone) => setForm({ ...form, tone })} placeholder="例如：热血压迫感、冷感悬疑" />
+          绔犺妭璇皵
+          <ToneComposer value={form.tone} onChange={(tone) => setForm({ ...form, tone })} placeholder="" />
         </label>
         <label>
           目标字数
           <input type="number" min="800" max="8000" step="100" value={form.wordCount} onChange={(event) => setForm({ ...form, wordCount: Number(event.target.value) })} />
         </label>
       </div>
-      <label>
+      <label className="generator-hook-field">
         结尾钩子
         <input
           value={form.hook}
           onChange={(event) => setForm({ ...form, hook: event.target.value })}
-          placeholder="可选。不填则允许这一章自然收束。"
+          placeholder=""
         />
       </label>
       <SettingSelector

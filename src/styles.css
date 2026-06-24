@@ -49,7 +49,7 @@ button:disabled {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 304px minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
   min-height: 100vh;
 }
 
@@ -57,6 +57,7 @@ button:disabled {
   border-right: 1px solid var(--line);
   background: linear-gradient(180deg, rgba(235, 228, 215, 0.96), rgba(229, 220, 205, 0.96));
   padding: 24px;
+  width: 304px;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -65,6 +66,36 @@ button:disabled {
   height: 100vh;
   overflow-y: auto;
   backdrop-filter: blur(12px);
+  transition: width 180ms ease, padding 180ms ease;
+}
+
+.sidebar-collapse-toggle {
+  align-self: flex-end;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 252, 245, 0.94);
+  color: var(--ink);
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.sidebar.collapsed {
+  width: 48px;
+  padding: 16px 6px;
+  align-items: center;
+  overflow: hidden;
+}
+
+.sidebar.collapsed > :not(.sidebar-collapse-toggle) {
+  display: none;
+}
+
+.sidebar.collapsed .sidebar-collapse-toggle {
+  align-self: center;
 }
 
 .brand {
@@ -1050,9 +1081,13 @@ textarea:focus {
 
 .chapter-page-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.34fr);
+  grid-template-columns: minmax(240px, 0.28fr) minmax(0, 1fr) minmax(280px, 0.34fr);
   gap: 18px;
   align-items: start;
+}
+
+.chapter-generation-overview-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 0.36fr);
 }
 
 .standalone-entry-panel {
@@ -1097,6 +1132,27 @@ textarea:focus {
   top: 16px;
 }
 
+.chapter-directory-panel {
+  min-width: 0;
+  position: sticky;
+  top: 16px;
+  align-self: start;
+}
+
+.chapter-directory-panel .chapter-nav {
+  position: static;
+}
+
+.chapter-directory-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chapter-directory-action {
+  margin-top: 4px;
+}
+
 .chapter-nav-item {
   width: 100%;
   border: 1px solid var(--line);
@@ -1135,7 +1191,8 @@ textarea:focus {
 }
 
 .chapter-editor-panel,
-.version-panel {
+.version-panel,
+.chapter-directory-panel {
   min-width: 0;
 }
 
@@ -2172,7 +2229,15 @@ textarea:focus {
     grid-template-columns: 1fr;
   }
 
+  .chapter-generation-overview-grid {
+    grid-template-columns: 1fr;
+  }
+
   .chapter-nav {
+    position: static;
+  }
+
+  .chapter-directory-panel {
     position: static;
   }
 }

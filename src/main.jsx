@@ -6,6 +6,7 @@ import {
   Boxes,
   BrainCircuit,
   CheckCircle2,
+  ChevronLeft,
   ChevronRight,
   CircleDot,
   Clock3,
@@ -1618,6 +1619,10 @@ function App() {
   const [chapterEditorRoute, setChapterEditorRoute] = useState(() => readChapterEditorRoute());
   const [settingExtractorRoute, setSettingExtractorRoute] = useState(() => readSettingExtractorRoute());
   const [rewritePrefill, setRewritePrefill] = useState(null);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem("ai-novel:sidebar-collapsed") === "true";
+  });
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState("");
   const [error, setError] = useState("");
@@ -1638,6 +1643,11 @@ function App() {
     window.addEventListener("hashchange", syncRoute);
     return () => window.removeEventListener("hashchange", syncRoute);
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("ai-novel:sidebar-collapsed", String(isSidebarCollapsed));
+  }, [isSidebarCollapsed]);
 
   function notify(message) {
     setToast(message);
@@ -2064,42 +2074,56 @@ function App() {
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark">
-            <BrainCircuit size={22} />
-          </div>
-          <div>
-            <strong>AI 小说导演</strong>
-            <span>长篇创作工作台</span>
-          </div>
-        </div>
+      <aside className={`sidebar ${isSidebarCollapsed ? "collapsed" : ""}`}>
+        <button
+          className="sidebar-collapse-toggle"
+          type="button"
+          aria-expanded={!isSidebarCollapsed}
+          aria-label={isSidebarCollapsed ? "展开侧栏" : "收起侧栏"}
+          onClick={() => setIsSidebarCollapsed((current) => !current)}
+        >
+          {isSidebarCollapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
+        </button>
 
-        <ProjectCreator
-          onCreate={(project) => mutate("/api/projects", project, "创建项目")}
-          disabled={Boolean(working)}
-        />
+        {!isSidebarCollapsed && (
+          <>
+            <div className="brand">
+              <div className="brand-mark">
+                <BrainCircuit size={22} />
+              </div>
+              <div>
+                <strong>AI 小说导演</strong>
+                <span>长篇创作工作台</span>
+              </div>
+            </div>
 
-        <div className="project-list">
-          {state.projects.map((project) => (
-            <button
-              key={project.id}
-              className={`project-pill ${project.id === activeProject?.id ? "active" : ""}`}
-              onClick={() => setActiveProjectId(project.id)}
-            >
-              <BookOpen size={16} />
-              <span>{project.title}</span>
-              <ChevronRight size={15} />
-            </button>
-          ))}
-        </div>
+            <ProjectCreator
+              onCreate={(project) => mutate("/api/projects", project, "创建项目")}
+              disabled={Boolean(working)}
+            />
 
-        <div className="sidebar-footer">
-          {activeProject && (
-            <ProjectDangerZone project={activeProject} mutate={mutate} working={working} />
-          )}
-          <AiConfigPanel aiConfig={state.aiConfig} mutate={mutate} working={working} />
-        </div>
+            <div className="project-list">
+              {state.projects.map((project) => (
+                <button
+                  key={project.id}
+                  className={`project-pill ${project.id === activeProject?.id ? "active" : ""}`}
+                  onClick={() => setActiveProjectId(project.id)}
+                >
+                  <BookOpen size={16} />
+                  <span>{project.title}</span>
+                  <ChevronRight size={15} />
+                </button>
+              ))}
+            </div>
+
+            <div className="sidebar-footer">
+              {activeProject && (
+                <ProjectDangerZone project={activeProject} mutate={mutate} working={working} />
+              )}
+              <AiConfigPanel aiConfig={state.aiConfig} mutate={mutate} working={working} />
+            </div>
+          </>
+        )}
       </aside>
 
       <main className="workspace">
@@ -2149,7 +2173,21 @@ function App() {
           <nav className="tabs">
             <TabButton active={activeTab === "studio"} onClick={() => setActiveTab("studio")} icon={Gauge} label="创作台" />
             <TabButton active={activeTab === "bible"} onClick={() => setActiveTab("bible")} icon={Library} label="设定库" />
-            <TabButton active={activeTab === "chapters"} onClick={() => setActiveTab("chapters")} icon={FileText} label="章节" />
+            <TabButton active={activeTab === "chapters"} onClick={() => setActiveTab("chapters")} icon={FileText} label="章节生成" />
+            <TabButton
+              active={false}
+              onClick={() => {
+                if (!activeProject) return;
+                const chapterId = chapterWorkspace.selectedChapterId || activeProject.chapters[0]?.id || "";
+                if (chapterId) {
+                  openChapterEditorPage(activeProject.id, chapterId);
+                } else {
+                  openBlankChapterEditorPage(activeProject.id);
+                }
+              }}
+              icon={Edit3}
+              label="章节编辑"
+            />
             <TabButton active={activeTab === "threads"} onClick={() => setActiveTab("threads")} icon={GitBranch} label="伏笔" />
             <TabButton active={activeTab === "rewrite"} onClick={() => setActiveTab("rewrite")} icon={Wand2} label="润色/修改" />
             <TabButton active={activeTab === "io"} onClick={() => setActiveTab("io")} icon={BrainCircuit} label="I/O记录" />
@@ -2157,7 +2195,7 @@ function App() {
         )}
 
         {activeProject && isStandaloneChapterEditor && standaloneRouteReady && (
-          <StandaloneChapterEditorPage
+          <ChapterEditorPage
             project={activeProject}
             mutate={mutate}
             working={working}
@@ -2176,7 +2214,7 @@ function App() {
         {activeProject && isStandaloneChapterEditor && !standaloneRouteReady && (
           <div className="center-screen">
             <Loader2 className="spin" size={24} />
-            <span>正在切换独立章节编辑页</span>
+            <span>正在切换章节编辑页</span>
           </div>
         )}
 
@@ -2212,20 +2250,12 @@ function App() {
           />
         )}
         {activeProject && !hasLeafPage && activeTab === "chapters" && (
-          <ChaptersTab
+          <ChapterGenerationPage
             project={activeProject}
-            request={request}
-            mutate={mutate}
-            streamEvents={streamEvents}
             working={working}
             workspace={chapterWorkspace}
-            downloadBinary={downloadBinary}
             openChapterEditorPage={openChapterEditorPage}
             openBlankChapterEditorPage={openBlankChapterEditorPage}
-            onRewriteSelection={openPartialRewrite}
-            onOpenSettingExtractor={(chapterId = "") =>
-              openSettingExtractorPage(activeProject.id, chapterId)
-            }
           />
         )}
         {activeProject && !hasLeafPage && activeTab === "threads" && (
@@ -3278,7 +3308,6 @@ function ChapterEditorPanel({
   downloadChapter,
   chapterDownloadFormat,
   setChapterDownloadFormat,
-  onOpenStandalone,
   onRewriteSelection,
   onOpenSettingExtractor
 }) {
@@ -3332,12 +3361,6 @@ function ChapterEditorPanel({
             </div>
             <div className="toolbar-wrap">
               <SaveIndicator draft={selectedDraft} />
-              {onOpenStandalone && (
-                <button className="secondary-button" disabled={Boolean(working)} onClick={onOpenStandalone}>
-                  <FileText size={16} />
-                  独立编辑页
-                </button>
-              )}
               {onOpenSettingExtractor && (
                 <button className="secondary-button" disabled={Boolean(working)} onClick={onOpenSettingExtractor}>
                   <Library size={16} />
@@ -3465,6 +3488,47 @@ function ChapterVersionPanel({ selectedChapter, restoreVersion }) {
   );
 }
 
+function ChapterDirectoryPanel({ project, selectedChapterId, onChangeChapter }) {
+  const chapters = project.chapters || [];
+
+  return (
+    <aside className="panel chapter-directory-panel">
+      <div className="panel-title compact">
+        <div>
+          <p className="eyebrow">目录</p>
+          <h2>章节目录</h2>
+        </div>
+        <span>{chapters.length}</span>
+      </div>
+      <p className="chapter-page-note">
+        从这里切换要编辑的章节。左侧目录会保持当前项目下的章节顺序，方便连续修稿。
+      </p>
+      <div className="chapter-nav">
+        {chapters.length ? (
+          chapters.map((chapter) => (
+            <button
+              key={chapter.id}
+              className={`chapter-nav-item ${chapter.id === selectedChapterId ? "active" : ""}`}
+              type="button"
+              onClick={() => onChangeChapter(chapter.id)}
+            >
+              <div>
+                <span>第 {chapter.number} 章</span>
+                <strong>{chapter.title}</strong>
+              </div>
+              <small>{chapter.beats?.length || 0} 个情节点</small>
+            </button>
+          ))
+        ) : (
+          <div className="chapter-directory-empty">
+            <EmptyState text="当前项目还没有章节，先创建一个空白章节再开始编辑。" />
+          </div>
+        )}
+      </div>
+    </aside>
+  );
+}
+
 function ManualChapterDraftEditor({ project, mutate, working, onCreatedChapter, standalone = false }) {
   const manualDraftKey = useMemo(() => makeWebDraftKey(project.id, "manual-chapter-draft"), [project.id]);
   const [draft, setDraft, resetDraft] = useWebDraftState(manualDraftKey, buildManualChapterDraft(project));
@@ -3490,7 +3554,7 @@ function ManualChapterDraftEditor({ project, mutate, working, onCreatedChapter, 
       <div className="panel-title">
         <div>
           <p className="eyebrow">{standalone ? "Standalone Draft" : "Manual Draft"}</p>
-          <h2>{standalone ? "空白章节独立编辑页" : "空白章节编辑器"}</h2>
+          <h2>{standalone ? "空白章节编辑" : "空白章节编辑器"}</h2>
         </div>
         <div className="toolbar-wrap">
           <span className="draft-hint">本地草稿实时保存</span>
@@ -3540,60 +3604,7 @@ function ManualChapterDraftEditor({ project, mutate, working, onCreatedChapter, 
   );
 }
 
-function StandaloneChapterEntryPanel({ project, selectedChapter, working, onOpenStandalone, onOpenBlankStandalone }) {
-  const targetChapter = selectedChapter || project.chapters[0] || null;
-
-  return (
-    <div className="panel standalone-entry-panel">
-      <div className="panel-title">
-        <div>
-          <p className="eyebrow">Standalone Entry</p>
-          <h2>独立章节编辑页</h2>
-        </div>
-        <FileText size={20} />
-      </div>
-      {targetChapter ? (
-        <div className="standalone-entry-content">
-          <p>
-            当前可直接打开独立编辑页：
-            <strong>第 {targetChapter.number} 章 · {targetChapter.title}</strong>
-          </p>
-          <div className="standalone-entry-actions">
-            <button
-              className="primary-button"
-              type="button"
-              disabled={Boolean(working)}
-              onClick={() => onOpenStandalone(targetChapter.id)}
-            >
-              <FileText size={16} />
-              打开独立章节编辑页
-            </button>
-            <button
-              className="secondary-button"
-              type="button"
-              disabled={Boolean(working)}
-              onClick={onOpenBlankStandalone}
-            >
-              <Edit3 size={16} />
-              新建空白独立编辑页
-            </button>
-          </div>
-        </div>
-      ) : (
-        <div className="standalone-entry-empty">
-          <p>当前还没有已生成章节，所以独立章节编辑页入口不会出现。</p>
-          <p>你现在可以直接进入空白章节独立编辑页，先手写第一章，再保存入库。</p>
-          <button className="primary-button" type="button" disabled={Boolean(working)} onClick={onOpenBlankStandalone}>
-            <FileText size={16} />
-            打开空白章节独立编辑页
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function StandaloneChapterEditorPage({
+function ChapterEditorPage({
   project,
   mutate,
   working,
@@ -3637,169 +3648,42 @@ function StandaloneChapterEditorPage({
     <section className="chapter-page">
       <div className="panel chapter-page-header">
         <div>
-          <p className="eyebrow">Standalone Editor</p>
+          <p className="eyebrow">章节编辑</p>
           <h2>
             {isNewMode
-              ? "空白章节独立编辑页"
+              ? "空白章节编辑"
               : selectedChapter
-                ? `第 ${selectedChapter.number} 章独立编辑页`
-                : "章节独立编辑页"}
+                ? `第 ${selectedChapter.number} 章 · 章节编辑`
+                : "章节编辑"}
           </h2>
           <p className="chapter-page-note">
             {isNewMode
               ? "这里不依赖 AI 生成，可以直接手写新章节并保存入库。"
-              : "这里是独立章节编辑页面，专门用于单章全文编辑和版本管理。"}
+              : "这里是章节编辑子页面，专门用于单章全文编辑和版本管理。"}
           </p>
         </div>
         <div className="chapter-page-toolbar">
           <button className="secondary-button" type="button" onClick={onBack}>
-            返回章节列表
+            返回章节生成
           </button>
-          {!isNewMode && (
-            <select className="chapter-page-select" value={selectedChapterId} onChange={(event) => handleChapterChange(event.target.value)}>
-              {project.chapters.map((chapter) => (
-                <option key={chapter.id} value={chapter.id}>
-                  第 {chapter.number} 章 · {chapter.title}
-                </option>
-              ))}
-            </select>
-          )}
         </div>
       </div>
 
       <div className="chapter-page-grid">
-        {isNewMode ? (
-          <>
-            <ManualChapterDraftEditor
-              project={project}
-              mutate={mutate}
-              working={working}
-              standalone
-              onCreatedChapter={onCreateChapter}
-            />
-            <div className="panel version-panel">
-              <EmptyState text="保存为正式章节后，这里会显示版本记录。" />
-            </div>
-          </>
-        ) : (
-          <>
-            <ChapterEditorPanel
-              project={project}
-              mutate={mutate}
-              working={working}
-              selectedChapter={selectedChapter}
-              selectedDraft={selectedDraft}
-              updateDraft={updateDraft}
-              saveDraft={saveDraft}
-              saveChapter={saveChapter}
-              downloadChapter={downloadChapter}
-              chapterDownloadFormat={chapterDownloadFormat}
-              setChapterDownloadFormat={setChapterDownloadFormat}
-              onRewriteSelection={onRewriteSelection}
-              onOpenSettingExtractor={() =>
-                selectedChapter && onOpenSettingExtractor?.(selectedChapter.id)
-              }
-            />
-            <ChapterVersionPanel selectedChapter={selectedChapter} restoreVersion={restoreVersion} />
-          </>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function ChaptersTab({
-  project,
-  request,
-  mutate,
-  streamEvents,
-  working,
-  workspace,
-  downloadBinary,
-  openChapterEditorPage,
-  openBlankChapterEditorPage,
-  onRewriteSelection,
-  onOpenSettingExtractor
-}) {
-  const {
-    selectedChapter,
-    selectedChapterId,
-    selectedDraft,
-    setSelectedChapterId,
-    updateDraft,
-    saveDraft,
-    saveChapter,
-    restoreVersion
-  } = workspace;
-  const chapterDownloadKey = useMemo(() => makeWebDraftKey(project.id, "chapter-download-format"), [project.id]);
-  const [chapterDownloadFormat, setChapterDownloadFormat] = useWebDraftState(chapterDownloadKey, "markdown");
-
-  async function downloadChapter() {
-    if (!selectedChapter) return;
-    await downloadBinary(
-      `/api/projects/${project.id}/chapters/${selectedChapter.id}/export?format=${encodeURIComponent(chapterDownloadFormat)}`,
-      buildDownloadName(`第${selectedChapter.number}章-${selectedChapter.title}`, chapterDownloadFormat),
-      "下载当前章节"
-    );
-  }
-
-  return (
-    <section className="content-grid">
-      <div className="panel wide">
-        <div className="panel-title">
-          <div>
-            <p className="eyebrow">Generate</p>
-            <h2>单章驾驶舱</h2>
-          </div>
-          <Edit3 size={20} />
-        </div>
-        <ChapterGenerator
+        <ChapterDirectoryPanel
           project={project}
-          request={request}
-          mutate={mutate}
-          streamEvents={streamEvents}
-          working={working}
-          selectedChapter={selectedChapter}
-          onCreatedChapter={(chapterId) => setSelectedChapterId(chapterId)}
+          selectedChapterId={isNewMode ? "" : selectedChapterId}
+          onChangeChapter={handleChapterChange}
         />
-      </div>
-
-      <StandaloneChapterEntryPanel
-        project={project}
-        selectedChapter={selectedChapter}
-        working={working}
-        onOpenStandalone={(chapterId) => openChapterEditorPage(project.id, chapterId)}
-        onOpenBlankStandalone={() => openBlankChapterEditorPage(project.id)}
-      />
-
-      {project.chapters.length ? (
-        <div className="chapter-studio">
-          <aside className="panel chapter-nav">
-            <div className="panel-title compact">
-              <h2>章节列表</h2>
-              <span>{project.chapters.length}</span>
-            </div>
-            <div className="chapter-list-nav">
-              {project.chapters.map((chapter) => {
-                const draft = workspace.drafts[chapter.id];
-                const isDirty = draft?.status === "dirty" || draft?.status === "saving";
-                return (
-                  <button
-                    key={chapter.id}
-                    className={`chapter-nav-item ${chapter.id === selectedChapterId ? "active" : ""}`}
-                    onClick={() => setSelectedChapterId(chapter.id)}
-                  >
-                    <div>
-                      <span>第 {chapter.number} 章</span>
-                      <strong>{chapter.title}</strong>
-                    </div>
-                    {isDirty && <small>草稿中</small>}
-                  </button>
-                );
-              })}
-            </div>
-          </aside>
-
+        {isNewMode ? (
+          <ManualChapterDraftEditor
+            project={project}
+            mutate={mutate}
+            working={working}
+            standalone
+            onCreatedChapter={onCreateChapter}
+          />
+        ) : (
           <ChapterEditorPanel
             project={project}
             mutate={mutate}
@@ -3812,23 +3696,110 @@ function ChaptersTab({
             downloadChapter={downloadChapter}
             chapterDownloadFormat={chapterDownloadFormat}
             setChapterDownloadFormat={setChapterDownloadFormat}
-            onOpenStandalone={() => selectedChapter && openChapterEditorPage(project.id, selectedChapter.id)}
             onRewriteSelection={onRewriteSelection}
             onOpenSettingExtractor={() =>
               selectedChapter && onOpenSettingExtractor?.(selectedChapter.id)
             }
           />
-
+        )}
+        {isNewMode ? (
+          <div className="panel version-panel">
+            <EmptyState text="保存为正式章节后，这里会显示版本记录。" />
+          </div>
+        ) : (
           <ChapterVersionPanel selectedChapter={selectedChapter} restoreVersion={restoreVersion} />
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ChapterGenerationPage({
+  project,
+  working,
+  workspace,
+  openChapterEditorPage,
+  openBlankChapterEditorPage
+}) {
+  const { selectedChapter } = workspace;
+
+  function openCurrentChapterEditor() {
+    if (!project?.id) return;
+    const chapterId = selectedChapter?.id || project.chapters[0]?.id || "";
+    if (chapterId) {
+      openChapterEditorPage(project.id, chapterId);
+      return;
+    }
+    openBlankChapterEditorPage(project.id);
+  }
+
+  return (
+    <section className="chapter-page">
+      <div className="panel chapter-page-header">
+        <div>
+          <p className="eyebrow">章节生成</p>
+          <h2>章节生成</h2>
+          <p className="chapter-page-note">
+            章节生成工作台已经迁到「创作台」里的单章驾驶舱。这里保留章节概览和跳转入口，方便你直接切到编辑页。
+          </p>
         </div>
-      ) : (
-        <ManualChapterDraftEditor
-          project={project}
-          mutate={mutate}
-          working={working}
-          onCreatedChapter={(chapterId) => setSelectedChapterId(chapterId)}
-        />
-      )}
+        <div className="chapter-page-toolbar">
+          <button className="secondary-button" type="button" disabled={Boolean(working)} onClick={openCurrentChapterEditor}>
+            <Edit3 size={16} />
+            打开章节编辑
+          </button>
+          <button className="secondary-button" type="button" disabled={Boolean(working)} onClick={() => openBlankChapterEditorPage(project.id)}>
+            <Plus size={16} />
+            新建空白章节
+          </button>
+        </div>
+      </div>
+
+      <div className="chapter-page-grid chapter-generation-overview-grid">
+        <div className="panel chapter-generation-panel">
+          <div className="panel-title">
+            <div>
+              <p className="eyebrow">章节概览</p>
+              <h2>最近章节与目录</h2>
+            </div>
+            <FileText size={20} />
+          </div>
+          {project.chapters.length ? (
+            <div className="chapter-generation-summary">
+              <div className="editor-footer">
+                <span>章节总数：{project.chapters.length}</span>
+                <span>最近更新：{formatTime(project.chapters[0]?.updatedAt || project.chapters[0]?.createdAt)}</span>
+              </div>
+              <PlotMap project={project} />
+            </div>
+          ) : (
+            <EmptyState text="当前项目还没有章节。先创建空白章节，再到章节编辑页继续补全正文。" />
+          )}
+        </div>
+
+        <div className="panel chapter-generation-panel">
+          <div className="panel-title">
+            <div>
+              <p className="eyebrow">快捷入口</p>
+              <h2>进入章节编辑</h2>
+            </div>
+            <Edit3 size={20} />
+          </div>
+          <p className="chapter-page-note">
+            需要连续修稿、切章编辑或查看版本时，直接进入章节编辑页。那里有左侧目录、中间正文和右侧版本记录。
+          </p>
+          <div className="standalone-entry-actions">
+            <button className="primary-button" type="button" disabled={Boolean(working)} onClick={openCurrentChapterEditor}>
+              <FileText size={16} />
+              打开当前章节
+            </button>
+            <button className="secondary-button" type="button" disabled={Boolean(working)} onClick={() => openBlankChapterEditorPage(project.id)}>
+              <Plus size={16} />
+              直接新建空白章节
+            </button>
+          </div>
+        </div>
+      </div>
     </section>
   );
 }
@@ -3903,6 +3874,8 @@ function ChapterGenerator({
   working,
   selectedChapter = null,
   onCreatedChapter,
+  onOpenStandalone,
+  onOpenBlankStandalone,
   compact = false
 }) {
   const chapterGeneratorModeKey = useMemo(
@@ -4409,6 +4382,12 @@ function ChapterGenerator({
 
   return (
     <form className={`generator-form ${compact ? "compact" : ""}`} onSubmit={submit}>
+      <div className="panel-title compact generator-header">
+        <div>
+          <p className="eyebrow">章节生成</p>
+          <h2>章节生成</h2>
+        </div>
+      </div>
       <div className="list-toolbar segmented">
         <button
           className={isRegenerateMode ? "" : "active"}

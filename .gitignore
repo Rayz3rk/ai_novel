@@ -12,3 +12,5 @@ npm-debug.log*
 server/*.log
 server/*.out
 server/*.err
+backup/
+scripts/

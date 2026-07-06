@@ -8,17 +8,14 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
-  CircleDot,
   Clock3,
   Download,
   Edit3,
   FileText,
-  Flame,
   Gauge,
   GitBranch,
   Library,
   Loader2,
-  MapPinned,
   MessageSquareText,
   Plus,
   RefreshCw,
@@ -26,764 +23,119 @@ import {
   Sparkles,
   Target,
   Trash2,
-  Users,
   Wand2
 } from "lucide-react";
+import { EmptyState } from "./components/EmptyState.jsx";
+import { ToneComposer } from "./components/ToneComposer.jsx";
+import { ChapterEditorPage } from "./features/chapter-editor/ChapterEditorPage.jsx";
+import { ChapterGenerationPage } from "./features/chapter-generation/ChapterGenerationPage.jsx";
+import { GenerationReviewPanel as ChapterGenerationReviewPanel } from "./features/chapter-workflow/GenerationReviewPanel.jsx";
+import {
+  ChapterTaskFlow,
+  ConstraintLayersPanel,
+  ConstraintPolicyComposer,
+  WorkflowActionBanner,
+  WorkflowRuntimePanel,
+  WorkflowSummaryBlock,
+  WorkflowTracePanel
+} from "./features/chapter-workflow/WorkflowPanels.jsx";
+import { SkillsTab } from "./features/skills/SkillsTab.jsx";
+import { buildHumanizeSkillSummary } from "./features/skills/skill-utils.js";
+import { ThreadsTab } from "./features/threads/ThreadsTab.jsx";
+import {
+  PlotMap,
+  ReportCard,
+  StoryStateOverview,
+  StoryStateTab
+} from "./features/story-state/StoryStatePanels.jsx";
+import { IoLogsTab } from "./features/io-logs/IoLogsTab.jsx";
+import { McpToolsTab } from "./features/mcp/McpToolsTab.jsx";
+import { RewriteTab } from "./features/rewrite/RewriteTab.jsx";
+import { ProjectTonePanel } from "./features/studio/ProjectTonePanel.jsx";
+import { StudioTab } from "./features/studio/StudioTab.jsx";
+import { BibleTab } from "./features/settings/BibleTab.jsx";
+import { SettingExtractorPage } from "./features/settings/SettingExtractorPage.jsx";
+import {
+  constraintPolicyOptions,
+  downloadFormatOptions,
+  genreOptions,
+  rewriteStyles,
+  settingTypes,
+  workflowStageLabels
+} from "./lib/app-constants.js";
+import { formatJsonBlock, formatTime, buildDownloadName, summarizeInlineText } from "./lib/format.js";
+import {
+  AgentTracePanel,
+  ResearchTracePanel,
+  findLatestIoLog
+} from "./lib/io-log-helpers.jsx";
+import { buildMcpServerDraft, parseJsonDraft, parseMcpArgs } from "./lib/mcp.js";
+import {
+  applyPartialRewrite,
+  buildAiProfileDraft,
+  buildChapterDraft,
+  buildForeshadowDraft,
+  buildManualChapterDraft,
+  buildPartialRewriteSelection,
+  buildRewriteDraft,
+  buildTransformVersionLabel,
+  findChapterById,
+  findProjectById,
+  getNextChapterNumber,
+  getProjectDeleteCode,
+  isAbortLikeError,
+  parseSseDataBlock,
+  readTextSelection,
+  sameDraft
+} from "./lib/project-helpers.js";
+import {
+  buildChapterEditorHash,
+  buildSettingExtractorHash,
+  readChapterEditorRoute,
+  readSettingExtractorRoute
+} from "./lib/routes.js";
+import {
+  buildChapterSourceText,
+  buildExtractedSettingDraft,
+  buildSettingDraft,
+  buildSettingExtractionDraft,
+  formatSettingCode,
+  formatSettingLabel,
+  normalizeSettingSelection,
+  normalizeTagList,
+  sortSettings,
+  stringifyTagList
+} from "./features/settings/settings-helpers.js";
+import {
+  mapRelationshipKindLabel,
+  mapStoryHeatLabel,
+  mapStoryStateSourceLabel
+} from "./features/story-state/story-state-helpers.js";
+import {
+  aggregateRuntimeStepState,
+  buildConstraintPolicyLabels,
+  buildGuardSummaryLine,
+  buildPlannerSummaryLine,
+  buildRuntimeStageSummary,
+  buildWorkflowOutcomeSummaryLine,
+  buildWorkflowRecommendation,
+  buildWorkflowTraceLogs,
+  defaultReviewSource,
+  deriveConstraintLayersFromContract,
+  describeWorkflowTrace,
+  formatElapsedDuration,
+  formatRuntimeStatus,
+  getWorkflowRuntimeProgress,
+  joinEditorList,
+  normalizeConstraintPolicyDraft,
+  normalizeEditorList,
+  resolveReviewSourceContent
+} from "./features/chapter-workflow/workflow-helpers.js";
+import { useWebDraftState } from "./hooks/useWebDraftState.js";
+import { makeWebDraftKey } from "./lib/webDraft.js";
 import "./styles.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8787";
-
-const settingTypes = [
-  { id: "character", label: "角色", icon: Users },
-  { id: "world", label: "世界观", icon: Boxes },
-  { id: "location", label: "地点", icon: MapPinned },
-  { id: "item", label: "道具", icon: CircleDot },
-  { id: "power", label: "能力体系", icon: Flame }
-];
-
-const genreOptions = ["玄幻", "言情", "悬疑", "都市", "短剧化小说", "同人 / OC"];
-const rewriteStyles = [
-  "更网文化",
-  "更文学化",
-  "更紧张",
-  "更暧昧",
-  "更克制",
-  "更热血",
-  "更悬疑",
-  "更短剧化"
-];
-const tonePresets = [
-  "热血",
-  "冷峻",
-  "轻松",
-  "悬疑感强",
-  "暧昧拉扯",
-  "史诗感",
-  "第一人称压迫式"
-];
-const constraintPolicyOptions = [
-  {
-    id: "lockCharacterMotivations",
-    label: "锁人物动机",
-    description: "把已选角色的动机压进本章约束，减少人设漂移。"
-  },
-  {
-    id: "strictWorldRules",
-    label: "锁世界规则",
-    description: "把能力、世界观和禁忌规则显式锁进 forbidden。"
-  },
-  {
-    id: "lockRecentContinuity",
-    label: "锁最近连续性",
-    description: "强制承接最近章节的事实、情绪和关系走向。"
-  },
-  {
-    id: "enforceForeshadowContinuity",
-    label: "锁伏笔照应",
-    description: "把未回收伏笔压进 continuity，减少漏接。"
-  }
-];
-const workflowStageLabels = {
-  planner: "Planner",
-  guard_preflight: "Preflight Guard",
-  writer: "Writer",
-  "writer-local": "Writer",
-  guard: "Post Guard",
-  repair: "Repair",
-  review_session: "生成审阅稿",
-  review_commit: "确认入库",
-  discard: "丢弃审阅稿"
-};
-const downloadFormatOptions = [
-  { value: "txt", label: "TXT" },
-  { value: "markdown", label: "Markdown" },
-  { value: "docx", label: "Word" },
-  { value: "pdf", label: "PDF" },
-  { value: "epub", label: "EPUB" }
-];
-const settingTypeMap = Object.fromEntries(settingTypes.map((item) => [item.id, item]));
-
-const getProjectDeleteCode = (projectId) =>
-  `DEL-${projectId.replace(/^project_/, "").slice(-6).toUpperCase().padStart(6, "0")}`;
-
-function formatTime(value) {
-  if (!value) return "未保存";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "未保存";
-  return date.toLocaleString("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit"
-  });
-}
-
-function extensionForFormat(format) {
-  return format === "markdown" ? "md" : format;
-}
-
-function buildDownloadName(baseName, format) {
-  return `${baseName || "download"}.${extensionForFormat(format)}`;
-}
-
-function buildChapterEditorHash(projectId, chapterId, mode = "existing") {
-  if (!projectId) return "";
-  const params = new URLSearchParams({ projectId });
-  if (chapterId) {
-    params.set("chapterId", chapterId);
-  }
-  if (mode === "new") {
-    params.set("mode", "new");
-  }
-  return `#/chapter-editor?${params.toString()}`;
-}
-
-function buildSettingExtractorHash(projectId, chapterId = "") {
-  if (!projectId) return "";
-  const params = new URLSearchParams({ projectId });
-  if (chapterId) {
-    params.set("chapterId", chapterId);
-  }
-  return `#/setting-extractor?${params.toString()}`;
-}
-
-function readChapterEditorRoute() {
-  if (typeof window === "undefined") return null;
-  const match = window.location.hash.match(/^#\/chapter-editor(?:\?(.*))?$/);
-  if (!match) return null;
-
-  const params = new URLSearchParams(match[1] || "");
-  const projectId = params.get("projectId") || "";
-  const chapterId = params.get("chapterId") || "";
-  const mode = params.get("mode") === "new" ? "new" : "existing";
-
-  if (!projectId) return null;
-  if (mode === "new") return { projectId, chapterId: "", mode };
-  if (!chapterId) return null;
-  return { projectId, chapterId, mode };
-}
-
-function readSettingExtractorRoute() {
-  if (typeof window === "undefined") return null;
-  const match = window.location.hash.match(/^#\/setting-extractor(?:\?(.*))?$/);
-  if (!match) return null;
-
-  const params = new URLSearchParams(match[1] || "");
-  const projectId = params.get("projectId") || "";
-  const chapterId = params.get("chapterId") || "";
-
-  if (!projectId) return null;
-  return { projectId, chapterId };
-}
-
-function padSettingNumber(value) {
-  return String(Math.max(1, Number(value) || 0)).padStart(2, "0");
-}
-
-function formatSettingCode(setting) {
-  const typeLabel = settingTypeMap[setting?.type]?.label || "设定";
-  return `${typeLabel}-${padSettingNumber(setting?.categoryNumber)}`;
-}
-
-function formatSettingLabel(setting) {
-  return `${formatSettingCode(setting)} ${setting?.name || "未命名设定"}`;
-}
-
-function sortSettings(settings) {
-  return [...(settings || [])].sort((left, right) => {
-    const leftIndex = settingTypes.findIndex((item) => item.id === left.type);
-    const rightIndex = settingTypes.findIndex((item) => item.id === right.type);
-    if (leftIndex !== rightIndex) return leftIndex - rightIndex;
-
-    const numberDiff = (Number(left.categoryNumber) || 0) - (Number(right.categoryNumber) || 0);
-    if (numberDiff !== 0) return numberDiff;
-
-    return String(left.name || "").localeCompare(String(right.name || ""), "zh-CN");
-  });
-}
-
-function normalizeTagList(value) {
-  const items = Array.isArray(value)
-    ? value
-    : String(value || "")
-        .split(/[、,，;；/|\n]+/);
-  const seen = new Set();
-
-  return items
-    .map((item) => String(item || "").trim())
-    .filter((item) => item && !seen.has(item) && seen.add(item));
-}
-
-function stringifyTagList(value) {
-  return normalizeTagList(value).join("、");
-}
-
-function normalizeSettingSelection(value, project) {
-  const validIds = new Set((project?.settings || []).map((item) => item.id));
-  if (!Array.isArray(value)) return [];
-
-  const seen = new Set();
-  return value
-    .map((item) => String(item || "").trim())
-    .filter((item) => item && validIds.has(item) && !seen.has(item) && seen.add(item));
-}
-
-function buildChapterSourceText(chapter) {
-  if (!chapter) return "";
-  return chapter.draftSavedAt
-    ? chapter.draftContent || chapter.content || ""
-    : chapter.content || chapter.draftContent || "";
-}
-
-function makeClientId(prefix = "draft") {
-  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function buildExtractedSettingDraft(item, index = 0) {
-  return {
-    tempId: item?.tempId || makeClientId("extract"),
-    checked: item?.checked ?? true,
-    type: item?.type || "character",
-    name: item?.name || `新设定${index + 1}`,
-    summary: item?.summary || "",
-    traits: stringifyTagList(item?.traits || ""),
-    rules: item?.rules || "",
-    evidence: item?.evidence || ""
-  };
-}
-
-function buildSettingExtractionDraft(project, chapterId = "") {
-  return {
-    sourceMode: chapterId ? "chapter" : "manual",
-    chapterId: chapterId || project?.chapters?.[0]?.id || "",
-    manualSource: "",
-    results: []
-  };
-}
-
-function makeWebDraftKey(projectId, scope) {
-  return projectId ? `ai-novel:web-draft:${projectId}:${scope}` : "";
-}
-
-function readWebDraft(storageKey, fallbackValue) {
-  if (!storageKey || typeof window === "undefined") return fallbackValue;
-
-  try {
-    const raw = window.localStorage.getItem(storageKey);
-    if (!raw) return fallbackValue;
-    const parsed = JSON.parse(raw);
-
-    if (
-      parsed &&
-      fallbackValue &&
-      typeof parsed === "object" &&
-      typeof fallbackValue === "object" &&
-      !Array.isArray(parsed) &&
-      !Array.isArray(fallbackValue)
-    ) {
-      return { ...fallbackValue, ...parsed };
-    }
-
-    return parsed;
-  } catch {
-    return fallbackValue;
-  }
-}
-
-function useWebDraftState(storageKey, fallbackValue) {
-  const fallbackRef = useRef(fallbackValue);
-  const [state, setState] = useState(() => readWebDraft(storageKey, fallbackValue));
-
-  useEffect(() => {
-    fallbackRef.current = fallbackValue;
-  }, [fallbackValue]);
-
-  useEffect(() => {
-    setState(readWebDraft(storageKey, fallbackValue));
-  }, [storageKey]);
-
-  useEffect(() => {
-    if (!storageKey || typeof window === "undefined") return;
-    try {
-      window.localStorage.setItem(storageKey, JSON.stringify(state));
-    } catch {
-      // Ignore quota or serialization errors and keep the in-memory state.
-    }
-  }, [storageKey, state]);
-
-  function reset(nextValue = fallbackRef.current) {
-    setState(nextValue);
-    if (!storageKey || typeof window === "undefined") return;
-    try {
-      window.localStorage.setItem(storageKey, JSON.stringify(nextValue));
-    } catch {
-      // Ignore storage failures and keep the in-memory state.
-    }
-  }
-
-  return [state, setState, reset];
-}
-
-function buildChapterDraft(chapter, project) {
-  const hasDraft = Boolean(chapter?.draftSavedAt);
-  return {
-    title: hasDraft ? chapter.draftTitle : chapter.title,
-    tone: hasDraft
-      ? chapter.draftTone || chapter.tone || project.defaultTone || "热血"
-      : chapter.tone || project.defaultTone || "热血",
-    content: hasDraft ? chapter.draftContent : chapter.content,
-    status: chapter?.draftSavedAt ? "saved" : "idle",
-    lastSavedAt: chapter?.draftSavedAt || chapter?.updatedAt || chapter?.createdAt || "",
-    error: ""
-  };
-}
-
-function getNextChapterNumber(project) {
-  return (
-    (project?.chapters || []).reduce(
-      (max, chapter) => Math.max(max, Number(chapter?.number) || 0),
-      0
-    ) + 1
-  );
-}
-
-function buildSettingDraft(setting) {
-  return {
-    type: setting?.type || "character",
-    name: setting?.name || "",
-    summary: setting?.summary || "",
-    traits: stringifyTagList(setting?.traits || ""),
-    rules: setting?.rules || ""
-  };
-}
-
-function buildAiProfileDraft(profile) {
-  return {
-    name: profile?.name || "",
-    provider: profile?.provider || "local",
-    apiKey: profile?.apiKey || "",
-    baseUrl: profile?.baseUrl || "",
-    model: profile?.model || "",
-    thinkingMode: profile?.thinkingMode || "",
-    reasoningEffort: profile?.reasoningEffort || ""
-  };
-}
-
-function normalizeConstraintPolicyDraft(policy = {}) {
-  return {
-    lockCharacterMotivations: policy?.lockCharacterMotivations !== false,
-    strictWorldRules: policy?.strictWorldRules !== false,
-    lockRecentContinuity: policy?.lockRecentContinuity !== false,
-    enforceForeshadowContinuity: policy?.enforceForeshadowContinuity !== false
-  };
-}
-
-function summarizeInlineText(text, limit = 88) {
-  const compact = String(text || "").replace(/\s+/g, " ").trim();
-  if (!compact) return "暂无";
-  return compact.length > limit ? `${compact.slice(0, limit)}...` : compact;
-}
-
-function isAbortLikeError(error) {
-  return (
-    error?.name === "AbortError" ||
-    error?.code === "ABORT_ERR" ||
-    /abort|cancell?ed/i.test(String(error?.message || ""))
-  );
-}
-
-function countTextUnits(text) {
-  return String(text || "").replace(/\s+/g, "").length;
-}
-
-function joinWorkflowSummaryParts(parts = []) {
-  return parts
-    .map((item) => String(item || "").trim())
-    .filter(Boolean)
-    .join(" · ");
-}
-
-function safeParseJsonObject(value) {
-  if (!value || typeof value !== "string") return null;
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch (_error) {
-    return null;
-  }
-}
-
-function mapGuardStatusLabel(status) {
-  if (status === "needs_fix") return "需修";
-  if (status === "block") return "阻断";
-  return "通过";
-}
-
-function mapEndingModeLabel(mode) {
-  if (mode === "hook") return "钩子收束";
-  if (mode === "open") return "开放收束";
-  return "自然收束";
-}
-
-function buildFindingDigest(findings = [], limit = 2) {
-  const labels = Array.from(
-    new Set(
-      (Array.isArray(findings) ? findings : [])
-        .map((item) => summarizeInlineText(item?.title || item?.type || "", 12))
-        .filter(Boolean)
-    )
-  );
-  return labels.slice(0, limit).join("、");
-}
-
-function buildPlannerSummaryLine(plan) {
-  if (!plan) return "Planner 尚未产出章节规划。";
-  const beatsCount = normalizeEditorList(plan.beats || []).length;
-  return joinWorkflowSummaryParts([
-    plan.narrativeMode || "混合",
-    beatsCount ? `${beatsCount}拍` : "",
-    mapEndingModeLabel(plan.endingMode),
-    summarizeInlineText(plan.summary || "章节 brief 已生成", 28)
-  ]);
-}
-
-function buildGuardSummaryLine(report, label = "Guard") {
-  if (!report) return `${label} 尚未运行。`;
-  const findingsCount = Array.isArray(report.findings) ? report.findings.length : Number(report.findingsCount || 0);
-  const findingsDigest = buildFindingDigest(report.findings || [], 2);
-  return joinWorkflowSummaryParts([
-    `${label} ${report.score ?? "--"}分${mapGuardStatusLabel(report.status)}`,
-    findingsCount ? `${findingsCount}项` : "无明显问题",
-    findingsDigest
-  ]);
-}
-
-function buildRepairSummaryLine({ repair, postGuard } = {}) {
-  const repairPlan = normalizeEditorList(repair?.repairPlan || postGuard?.repairPlan || []);
-  if (repair?.applied) {
-    return joinWorkflowSummaryParts([
-      `最小修订 ${Math.max(repairPlan.length, 1)} 处`,
-      repairPlan[0] ? summarizeInlineText(repairPlan[0], 24) : "",
-      repair?.repairedContent ? `${countTextUnits(repair.repairedContent)}字` : ""
-    ]);
-  }
-  if (repairPlan.length) {
-    return joinWorkflowSummaryParts([
-      "无需落笔修订",
-      `保留 ${repairPlan.length} 条提醒`
-    ]);
-  }
-  return "正文直接通过，无需修订。";
-}
-
-function buildWorkflowOutcomeSummaryLine(workflow) {
-  if (!workflow) return "Writer / Guard / Repair 结果待生成。";
-  return joinWorkflowSummaryParts([
-    workflow.postGuard
-      ? `${workflow.postGuard.score ?? "--"}分${mapGuardStatusLabel(workflow.postGuard.status)}`
-      : "",
-    workflow.repair?.applied
-      ? `Repair ${Math.max(normalizeEditorList(workflow.repair.repairPlan || []).length, 1)}处`
-      : "正文直接通过"
-  ]);
-}
-
-function splitRevisionBlocks(text) {
-  return String(text || "")
-    .split(/\n{2,}/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-function buildRevisionDiffSummary(beforeText, afterText) {
-  const before = String(beforeText || "").trim();
-  const after = String(afterText || "").trim();
-  const beforeBlocks = splitRevisionBlocks(before);
-  const afterBlocks = splitRevisionBlocks(after);
-  const maxBlocks = Math.max(beforeBlocks.length, afterBlocks.length);
-  let changedBlocks = 0;
-  let firstChangedBlock = null;
-
-  for (let index = 0; index < maxBlocks; index += 1) {
-    const beforeBlock = beforeBlocks[index] || "";
-    const afterBlock = afterBlocks[index] || "";
-    if (beforeBlock !== afterBlock) {
-      changedBlocks += 1;
-      if (!firstChangedBlock) {
-        firstChangedBlock = {
-          index: index + 1,
-          before: summarizeInlineText(beforeBlock, 76),
-          after: summarizeInlineText(afterBlock, 76)
-        };
-      }
-    }
-  }
-
-  return {
-    beforeUnits: countTextUnits(before),
-    afterUnits: countTextUnits(after),
-    deltaUnits: countTextUnits(after) - countTextUnits(before),
-    beforeBlocks: beforeBlocks.length,
-    afterBlocks: afterBlocks.length,
-    changedBlocks,
-    firstChangedBlock
-  };
-}
-
-function buildConstraintPolicyLabels(policy = {}) {
-  const normalized = normalizeConstraintPolicyDraft(policy);
-  return constraintPolicyOptions
-    .filter((item) => normalized[item.id])
-    .map((item) => item.label);
-}
-
-function mergeUniqueTextList(...lists) {
-  const seen = new Set();
-  return lists
-    .flat()
-    .map((item) => String(item || "").trim())
-    .filter((item) => item && !seen.has(item) && seen.add(item));
-}
-
-function isChapterIdentityConstraintEntry(item = "") {
-  const text = String(item || "").trim();
-  if (!text) return false;
-  return /章节序号|正文首行|标题意象|第\s*\d+\s*章/.test(text);
-}
-
-function isContinuityConstraintEntry(item = "") {
-  const text = String(item || "").trim();
-  if (!text) return false;
-  return /最近章节|已发生|关系走向|情绪状态|承接/.test(text);
-}
-
-function isWorldRuleConstraintEntry(item = "") {
-  const text = String(item || "").trim();
-  if (!text) return false;
-  return /世界规则|能力规则|规则|禁忌|设定|代价|超自然/.test(text);
-}
-
-function deriveWorldRulesFromForbidden(forbidden = [], policy = {}) {
-  if (!policy.strictWorldRules) return [];
-  return normalizeEditorList(forbidden).filter(
-    (item) =>
-      isWorldRuleConstraintEntry(item) &&
-      !isChapterIdentityConstraintEntry(item) &&
-      !isContinuityConstraintEntry(item)
-  );
-}
-
-function deriveConstraintLayersFromContract(contract) {
-  if (!contract) return null;
-
-  const currentLayers = contract.constraintLayers || {};
-  const mustMention = normalizeEditorList(contract.mustMention || []);
-  const continuity = normalizeEditorList(contract.continuity || []);
-  const forbidden = normalizeEditorList(contract.forbidden || []);
-  const derivedPolicy = normalizeConstraintPolicyDraft(currentLayers.policy || {
-    lockCharacterMotivations: mustMention.some((item) => item.startsWith("人物动机锁：")),
-    strictWorldRules: forbidden.some(
-      (item) => item.startsWith("不能违反规则：") || isWorldRuleConstraintEntry(item)
-    ),
-    lockRecentContinuity: continuity.some((item) => item.startsWith("承接第") || item.startsWith("紧接第")),
-    enforceForeshadowContinuity: continuity.some((item) => item.startsWith("待照应伏笔"))
-  });
-
-  return {
-    policy: derivedPolicy,
-    chapterIdentity: mergeUniqueTextList(
-      currentLayers.chapterIdentity || [],
-      contract.chapterLock ? [contract.chapterLock] : [],
-      contract.titleLock ? [contract.titleLock] : [],
-      mustMention.filter((item) => item.startsWith("标题意象："))
-    ),
-    characterMotivations: mergeUniqueTextList(
-      currentLayers.characterMotivations || [],
-      mustMention
-        .filter((item) => item.startsWith("人物动机锁："))
-        .map((item) => item.replace(/^人物动机锁：/, "").trim())
-    ),
-    worldRules: mergeUniqueTextList(
-      currentLayers.worldRules || [],
-      forbidden
-        .filter((item) => item.startsWith("不能违反规则："))
-        .map((item) => item.replace(/^不能违反规则：/, "").trim()),
-      deriveWorldRulesFromForbidden(forbidden, derivedPolicy)
-    ),
-    continuityAnchors: mergeUniqueTextList(
-      currentLayers.continuityAnchors || [],
-      continuity.filter((item) => item.startsWith("承接第") || item.startsWith("紧接第"))
-    ),
-    foreshadowAnchors: mergeUniqueTextList(
-      currentLayers.foreshadowAnchors || [],
-      continuity.filter((item) => item.startsWith("待照应伏笔"))
-    ),
-    hardBans: mergeUniqueTextList(currentLayers.hardBans || [], forbidden)
-  };
-}
-
-function buildWorkflowRecommendation({
-  runtime,
-  preview,
-  workflow,
-  reviewSession,
-  previewStale,
-  reviewDirty,
-  isRegenerateMode
-}) {
-  if (runtime?.active) {
-    const currentStage =
-      runtime.stages.find((item) => item.key === runtime.currentStageKey) ||
-      runtime.stages.find((item) => item.status === "running") ||
-      runtime.stages.find((item) => item.status === "done" || item.status === "skipped") ||
-      null;
-    return {
-      tone: "ready",
-      title: `正在执行 ${currentStage?.label || "Workflow"}`,
-      detail: runtime.currentMessage || "阶段状态会实时刷新到下方运行面板。"
-    };
-  }
-
-  if (runtime?.cancelled) {
-    return {
-      tone: "warn",
-      title: "本次运行已取消",
-      detail: "可继续调整约束，或重新发起新一轮 preview / generate。"
-    };
-  }
-
-  if (reviewSession) {
-    return {
-      tone: "review",
-      title: isRegenerateMode ? "当前处于重生成审阅阶段" : "当前处于待入库审阅阶段",
-      detail: reviewDirty
-        ? "你已经手工改过正文，当前文本会作为最终入库版本。"
-        : "建议先看 Writer / Repair 的差异，再决定确认入库还是丢弃。"
-    };
-  }
-
-  if (previewStale) {
-    return {
-      tone: "warn",
-      title: "约束草案已经过期",
-      detail: "表单刚发生过变化。先刷新 contract / planner / guard，再生成审阅稿更稳。"
-    };
-  }
-
-  if (preview) {
-    return {
-      tone: "ready",
-      title: "约束草案已就位",
-      detail: "现在可以继续微调 contract / planner，或者直接生成章节审阅稿。"
-    };
-  }
-
-  if (workflow) {
-    return {
-      tone: "done",
-      title: "本轮工作流已完成",
-      detail: "你可以继续生成下一轮草案，或者去章节页、润色/修改页继续处理正文。"
-    };
-  }
-
-  return {
-    tone: "idle",
-    title: "先生成约束，再生成正文",
-    detail: "填写目标后先跑 contract / planner / preflight guard，会比直接写正文更稳。"
-  };
-}
-
-function buildWorkflowTraceLogs(project, { isRegenerateMode, selectedChapterId = "" } = {}) {
-  const allowedWorkflows = isRegenerateMode
-    ? new Set(["chapter_regenerate", "chapter_regenerate_preview", "generation_review"])
-    : new Set(["chapter_generate", "chapter_preview", "generation_review"]);
-
-  return (project?.ioLogs || [])
-    .filter((log) => allowedWorkflows.has(log.workflow))
-    .filter((log) => {
-      if (!isRegenerateMode) return true;
-      if (!selectedChapterId) return true;
-      if (!log.chapterId) return true;
-      return log.chapterId === selectedChapterId;
-    })
-    .slice(0, 8);
-}
-
-function legacyDescribeWorkflowTrace(log) {
-  if (!log) return "";
-  if (log.status === "error") {
-    return summarizeInlineText(log.outputText || "执行失败", 92);
-  }
-
-  if (log.stage === "guard_preflight") {
-    return `预写作评分 ${log.outputPayload?.score ?? "--"} / ${log.outputPayload?.status || "pass"}`;
-  }
-  if (log.stage === "guard") {
-    return `后置 guard 评分 ${log.outputPayload?.score ?? "--"} / ${log.outputPayload?.status || "pass"}`;
-  }
-  if (log.stage === "repair") {
-    return summarizeInlineText(log.outputText || "已生成最小修订稿", 92);
-  }
-  if (log.stage === "review_session") {
-    return "已生成待入库审阅稿，可继续人工干预。";
-  }
-  if (log.stage === "review_commit") {
-    return "审阅稿已确认入库。";
-  }
-  if (log.stage === "discard") {
-    return "审阅稿已丢弃，没有写入章节。";
-  }
-  if (log.stage === "planner") {
-    return summarizeInlineText(log.outputText || log.outputPayload?.summary || "已生成章节 brief", 92);
-  }
-  if (log.stage === "writer" || log.stage === "writer-local") {
-    return summarizeInlineText(log.outputText || "已生成 writer 原稿", 92);
-  }
-
-  return summarizeInlineText(log.outputText || JSON.stringify(log.outputPayload || {}), 92);
-}
-
-function describeWorkflowTrace(log) {
-  if (!log) return "";
-  if (log.status === "error") {
-    return summarizeInlineText(log.outputText || "执行失败", 92);
-  }
-
-  if (log.stage === "guard_preflight") {
-    return buildGuardSummaryLine(log.outputPayload, "Preflight");
-  }
-  if (log.stage === "guard") {
-    return buildGuardSummaryLine(log.outputPayload, "Post Guard");
-  }
-  if (log.stage === "repair") {
-    return buildRepairSummaryLine({
-      repair: {
-        applied: true,
-        repairedContent: log.outputText || "",
-        repairPlan: log.inputPayload?.guardReport?.repairPlan || []
-      },
-      postGuard: log.inputPayload?.guardReport || null
-    });
-  }
-  if (log.stage === "review_session") {
-    return "已生成待入库审阅稿，可继续人工干预。";
-  }
-  if (log.stage === "review_commit") {
-    return "审阅稿已确认入库。";
-  }
-  if (log.stage === "discard") {
-    return "审阅稿已丢弃，没有写入章节。";
-  }
-  if (log.stage === "planner") {
-    return buildPlannerSummaryLine(safeParseJsonObject(log.outputText) || log.outputPayload || {});
-  }
-  if (log.stage === "writer" || log.stage === "writer-local") {
-    return summarizeInlineText(log.outputText || "已生成 Writer 原稿", 72);
-  }
-
-  return summarizeInlineText(log.outputText || JSON.stringify(log.outputPayload || {}), 92);
-}
 
 function buildChapterGeneratorDraft(project, chapter = null) {
   return {
@@ -794,6 +146,9 @@ function buildChapterGeneratorDraft(project, chapter = null) {
     tone: chapter?.tone || project?.defaultTone || "热血",
     wordCount: Number(chapter?.wordCount) || 1800,
     selectedSettingIds: normalizeSettingSelection(chapter?.selectedSettingIds, project),
+    useMcp: false,
+    selectedMcpServerIds: [],
+    useSubagents: false,
     constraintPolicy: normalizeConstraintPolicyDraft(chapter?.constraintPolicy)
   };
 }
@@ -831,32 +186,7 @@ function buildWorkflowRuntimeState() {
   };
 }
 
-function legacyFormatRuntimeStatus(status) {
-  if (status === "running") return "运行中";
-  if (status === "done") return "已完成";
-  if (status === "skipped") return "已跳过";
-  if (status === "error") return "失败";
-  return "待执行";
-}
 
-function formatElapsedDuration(startedAt, finishedAt = "") {
-  const startTime = new Date(startedAt || "").getTime();
-  const endTime = finishedAt ? new Date(finishedAt).getTime() : Date.now();
-  if (Number.isNaN(startTime) || Number.isNaN(endTime) || endTime < startTime) return "--";
-
-  const totalSeconds = Math.max(0, Math.floor((endTime - startTime) / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  if (minutes >= 60) {
-    const hours = Math.floor(minutes / 60);
-    const remainMinutes = minutes % 60;
-    return `${hours}h ${remainMinutes}m ${seconds}s`;
-  }
-  if (minutes > 0) {
-    return `${minutes}m ${seconds}s`;
-  }
-  return `${seconds}s`;
-}
 
 function upsertWorkflowRuntimeStage(stages, payload) {
   const nextStage = {
@@ -937,7 +267,7 @@ function applyWorkflowRuntimeEvent(current, payload) {
       cancelled: false,
       finishedAt: payload.finishedAt || current.finishedAt,
       currentStageKey: "",
-      currentMessage: current.currentMessage || "本轮运行已完成"
+      currentMessage: current.currentMessage || "鏈疆杩愯宸插畬鎴?"
     };
   }
 
@@ -955,28 +285,6 @@ function applyWorkflowRuntimeEvent(current, payload) {
   return current;
 }
 
-function aggregateRuntimeStepState(runtime, keys = []) {
-  const stages = keys
-    .map((key) => runtime?.stages?.find((item) => item.key === key))
-    .filter(Boolean);
-  if (!stages.length) return "idle";
-  if (stages.some((item) => item.status === "cancelled")) return "cancelled";
-  if (stages.some((item) => item.status === "error")) return "error";
-  if (stages.some((item) => item.status === "running")) return "active";
-  if (stages.every((item) => item.status === "done" || item.status === "skipped" || item.status === "cancelled")) return "done";
-  return "idle";
-}
-
-function getWorkflowRuntimeProgress(runtime) {
-  const stages = runtime?.stages || [];
-  const total = stages.length;
-  const completed = stages.filter((item) => item.status === "done" || item.status === "skipped" || item.status === "cancelled").length;
-  return {
-    total,
-    completed,
-    percent: total ? Math.round((completed / total) * 100) : 0
-  };
-}
 
 function cancelWorkflowRuntime(current) {
   const finishedAt = new Date().toISOString();
@@ -986,13 +294,13 @@ function cancelWorkflowRuntime(current) {
     cancelled: true,
     finishedAt,
     currentStageKey: "",
-    currentMessage: "本次运行已取消。",
+    currentMessage: "鏈杩愯宸插彇娑堛€?",
     stages: (current?.stages || []).map((stage) =>
       stage.status === "running"
         ? {
             ...stage,
             status: "cancelled",
-            message: "已取消，未继续执行。",
+            message: "宸插彇娑堬紝鏈户缁墽琛屻€?",
             updatedAt: finishedAt
           }
         : stage
@@ -1001,74 +309,6 @@ function cancelWorkflowRuntime(current) {
   };
 }
 
-function formatRuntimeStatus(status) {
-  if (status === "running") return "运行中";
-  if (status === "done") return "已完成";
-  if (status === "skipped") return "已跳过";
-  if (status === "cancelled") return "已取消";
-  if (status === "error") return "失败";
-  return "待执行";
-}
-
-function buildRuntimeStageSummary(stage) {
-  if (!stage) return "";
-  if (stage.status === "running") {
-    return summarizeInlineText(stage.message || "阶段执行中", 56);
-  }
-  if (stage.status === "cancelled") {
-    return "已取消，未继续执行。";
-  }
-  if (stage.key === "planner" && stage.status === "done") {
-    return joinWorkflowSummaryParts([
-      stage.meta?.narrativeMode || "",
-      stage.meta?.beatsCount ? `${stage.meta.beatsCount}拍` : "",
-      "章节规划已锁定"
-    ]);
-  }
-  if (stage.key === "guard_preflight" && stage.status === "done") {
-    return joinWorkflowSummaryParts([
-      `${stage.meta?.score ?? "--"}分${mapGuardStatusLabel(stage.meta?.status)}`,
-      stage.meta?.findingsCount ? `${stage.meta.findingsCount}项风险` : "无明显风险"
-    ]);
-  }
-  if (stage.key === "guard" && stage.status === "done") {
-    return joinWorkflowSummaryParts([
-      `${stage.meta?.score ?? "--"}分${mapGuardStatusLabel(stage.meta?.status)}`,
-      stage.meta?.repairPlanCount ? `${stage.meta.repairPlanCount}条修订` : "无需修订"
-    ]);
-  }
-  if (stage.key === "repair") {
-    if (stage.status === "done") {
-      return joinWorkflowSummaryParts([
-        "最小修订已落笔",
-        stage.meta?.units ? `${stage.meta.units}字` : ""
-      ]);
-    }
-    if (stage.status === "skipped") {
-      return "无需修订，沿用 Writer 原稿。";
-    }
-  }
-  if (stage.key === "writer" && stage.status === "done" && stage.meta?.units) {
-    return `Writer 原稿已完成 · ${stage.meta.units}字`;
-  }
-  return summarizeInlineText(stage.message || "等待执行。", 56);
-}
-
-function normalizeEditorList(value) {
-  const items = Array.isArray(value)
-    ? value
-    : String(value || "")
-        .split(/\r?\n|[；;]+/)
-        .map((item) => item.trim());
-  const seen = new Set();
-  return items
-    .map((item) => String(item || "").trim())
-    .filter((item) => item && !seen.has(item) && seen.add(item));
-}
-
-function joinEditorList(value) {
-  return normalizeEditorList(value).join("\n");
-}
 
 function buildWorkflowSignature({ form, mode, chapterId = "" }) {
   return JSON.stringify({
@@ -1080,6 +320,11 @@ function buildWorkflowSignature({ form, mode, chapterId = "" }) {
     hook: form.hook || "",
     tone: form.tone || "",
     wordCount: Number(form.wordCount || 0),
+    useMcp: form.useMcp === true,
+    useSubagents: form.useSubagents === true,
+    selectedMcpServerIds: Array.from(
+      new Set((form.selectedMcpServerIds || []).map((item) => String(item || "").trim()).filter(Boolean))
+    ).sort(),
     constraintPolicy: normalizeConstraintPolicyDraft(form.constraintPolicy),
     selectedSettingIds: Array.from(
       new Set((form.selectedSettingIds || []).map((item) => String(item || "").trim()).filter(Boolean))
@@ -1165,147 +410,6 @@ function resolveGuardFindingPatch(finding, preview) {
   }
 
   return { contractPatch, planPatch };
-}
-
-function defaultReviewSource(workflow) {
-  return workflow?.repair?.applied ? "repair" : "writer";
-}
-
-function resolveReviewSourceContent(workflow, source = defaultReviewSource(workflow)) {
-  if (!workflow) return "";
-  if (source === "writer") {
-    return workflow.repair?.originalContent || "";
-  }
-  return workflow.repair?.repairedContent || workflow.repair?.reviewContent || workflow.repair?.originalContent || "";
-}
-
-function buildManualChapterDraft(project) {
-  return {
-    title: "",
-    tone: project?.defaultTone || "热血",
-    content: ""
-  };
-}
-
-function buildForeshadowDraft() {
-  return {
-    content: "",
-    plantedChapter: "",
-    expectedPayoff: "",
-    related: "",
-    status: "未回收"
-  };
-}
-
-function buildRewriteDraft() {
-  return {
-    mode: "polish",
-    style: "更网文化",
-    instruction: "",
-    followChapter: true,
-    sourceMode: "chapter",
-    selectionContext: null,
-    manualSource: "",
-    result: ""
-  };
-}
-
-function summarizeInstruction(value, limit = 24) {
-  const compact = String(value || "").replace(/\s+/g, " ").trim();
-  if (!compact) return "按要求修改";
-  return compact.length > limit ? `${compact.slice(0, limit)}...` : compact;
-}
-
-function buildTransformVersionLabel(form) {
-  return form.mode === "modify" ? `修改｜${summarizeInstruction(form.instruction)}` : form.style;
-}
-
-function formatJsonBlock(value) {
-  if (value == null) return "";
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch (_error) {
-    return String(value);
-  }
-}
-
-function parseSseDataBlock(block) {
-  const data = block
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith("data:"))
-    .map((line) => line.slice(5).trim())
-    .join("\n");
-
-  if (!data) return null;
-  return JSON.parse(data);
-}
-
-function clampSelectionIndex(value, max) {
-  return Math.max(0, Math.min(Number(value) || 0, max));
-}
-
-function buildPartialRewriteSelection({ chapter, content, start, end }) {
-  const safeStart = clampSelectionIndex(Math.min(start, end), content.length);
-  const safeEnd = clampSelectionIndex(Math.max(start, end), content.length);
-  const selectedText = content.slice(safeStart, safeEnd);
-
-  if (!selectedText) return null;
-
-  return {
-    id: `selection-${Date.now()}`,
-    chapterId: chapter.id,
-    chapterNumber: chapter.number,
-    chapterTitle: chapter.title,
-    start: safeStart,
-    end: safeEnd,
-    selectedText
-  };
-}
-
-function readTextSelection(target, fallbackLength = 0) {
-  const max = typeof target?.value === "string" ? target.value.length : fallbackLength;
-  return {
-    start: clampSelectionIndex(Math.min(target?.selectionStart || 0, target?.selectionEnd || 0), max),
-    end: clampSelectionIndex(Math.max(target?.selectionStart || 0, target?.selectionEnd || 0), max)
-  };
-}
-
-function resolvePartialRewriteRange(content, selection) {
-  if (!selection?.selectedText) return null;
-
-  const originalText = selection.selectedText;
-  const start = clampSelectionIndex(selection.start, content.length);
-  const end = clampSelectionIndex(selection.end, content.length);
-
-  if (content.slice(start, end) === originalText) {
-    return { start, end };
-  }
-
-  const firstIndex = content.indexOf(originalText);
-  if (firstIndex !== -1 && firstIndex === content.lastIndexOf(originalText)) {
-    return { start: firstIndex, end: firstIndex + originalText.length };
-  }
-
-  return null;
-}
-
-function applyPartialRewrite(content, selection, replacement) {
-  const range = resolvePartialRewriteRange(content, selection);
-  if (!range) return null;
-  return `${content.slice(0, range.start)}${replacement}${content.slice(range.end)}`;
-}
-
-function sameDraft(a, b) {
-  return a?.title === b?.title && a?.tone === b?.tone && a?.content === b?.content;
-}
-
-function findProjectById(data, projectId) {
-  return data?.projects?.find((project) => project.id === projectId);
-}
-
-function findChapterById(project, chapterId) {
-  return project?.chapters?.find((chapter) => chapter.id === chapterId);
 }
 
 function useChapterWorkspace({ activeProject, request, setState, setError, notify }) {
@@ -1456,7 +560,7 @@ function useChapterWorkspace({ activeProject, request, setState, setError, notif
 
       setState(data);
       syncDraftFromResponse(data, project.id, chapterId, draft);
-      if (!silent) notify("草稿已保存");
+      if (!silent) notify("鑽夌宸蹭繚瀛?");
       return data;
     } catch (error) {
       setDrafts((current) => ({
@@ -1499,7 +603,7 @@ function useChapterWorkspace({ activeProject, request, setState, setError, notif
 
       setState(data);
       syncDraftFromResponse(data, project.id, chapterId, draft);
-      notify("章节已保存到数据库");
+      notify("绔犺妭宸蹭繚瀛樺埌鏁版嵁搴?");
       return data;
     } catch (error) {
       setDrafts((current) => ({
@@ -1527,7 +631,7 @@ function useChapterWorkspace({ activeProject, request, setState, setError, notif
           : payload.content;
 
       if (payload.scope === "selection" && nextContent == null) {
-        throw new Error("原文选区已经变化，无法定位局部替换位置。请回到章节编辑器重新选择。");
+        throw new Error("鍘熸枃閫夊尯宸茬粡鍙樺寲锛屾棤娉曞畾浣嶅眬閮ㄦ浛鎹綅缃€傝鍥炲埌绔犺妭缂栬緫鍣ㄩ噸鏂伴€夋嫨銆?");
       }
 
       const data = await request(`/api/projects/${project.id}/chapters/${chapterId}/rewrite-apply`, {
@@ -1545,7 +649,7 @@ function useChapterWorkspace({ activeProject, request, setState, setError, notif
         ...draft,
         content: nextContent
       });
-      notify(payload.scope === "selection" ? "润色结果已替换选中片段" : "润色结果已覆盖当前章节");
+      notify(payload.scope === "selection" ? "娑﹁壊缁撴灉宸叉浛鎹㈤€変腑鐗囨" : "娑﹁壊缁撴灉宸茶鐩栧綋鍓嶇珷鑺?");
       return data;
     } catch (error) {
       setError(error.message);
@@ -1565,7 +669,7 @@ function useChapterWorkspace({ activeProject, request, setState, setError, notif
           : payload.content;
 
       if (payload.scope === "selection" && nextContent == null) {
-        throw new Error("原文选区已经变化，无法保存局部替换版本。请重新选择后再试。");
+        throw new Error("鍘熸枃閫夊尯宸茬粡鍙樺寲锛屾棤娉曚繚瀛樺眬閮ㄦ浛鎹㈢増鏈€傝閲嶆柊閫夋嫨鍚庡啀璇曘€?");
       }
 
       const data = await request(`/api/projects/${project.id}/chapters/${chapterId}/versions`, {
@@ -1580,7 +684,7 @@ function useChapterWorkspace({ activeProject, request, setState, setError, notif
       });
 
       setState(data);
-      notify(payload.scope === "selection" ? "局部润色结果已另存为新版本" : "润色结果已另存为新版本");
+      notify(payload.scope === "selection" ? "灞€閮ㄦ鼎鑹茬粨鏋滃凡鍙﹀瓨涓烘柊鐗堟湰" : "娑﹁壊缁撴灉宸插彟瀛樹负鏂扮増鏈?");
       return data;
     } catch (error) {
       setError(error.message);
@@ -1697,7 +801,7 @@ function App() {
 
       const reader = response.body?.getReader();
       if (!reader) {
-        throw new Error("浏览器未返回可读取的流");
+        throw new Error("娴忚鍣ㄦ湭杩斿洖鍙鍙栫殑娴?");
       }
 
       const decoder = new TextDecoder();
@@ -1782,7 +886,7 @@ function App() {
 
       const reader = response.body?.getReader();
       if (!reader) {
-        throw new Error("浏览器未返回可读取的流");
+        throw new Error("娴忚鍣ㄦ湭杩斿洖鍙鍙栫殑娴?");
       }
 
       const decoder = new TextDecoder();
@@ -2026,6 +1130,12 @@ function App() {
     syncSettingExtractorRoute(null, { replace: true });
   }
 
+  function openPrimaryTab(tab) {
+    syncChapterEditorRoute(null, { replace: true });
+    syncSettingExtractorRoute(null, { replace: true });
+    setActiveTab(tab);
+  }
+
   function openPartialRewrite(selection) {
     if (!selection?.selectedText?.length) return;
     setRewritePrefill(selection);
@@ -2052,7 +1162,7 @@ function App() {
       anchor.download = fileName;
       anchor.click();
       window.URL.revokeObjectURL(url);
-      notify("下载已开始");
+      notify("涓嬭浇宸插紑濮?");
     } catch (err) {
       setError(err.message);
     } finally {
@@ -2130,8 +1240,8 @@ function App() {
         <header className="topbar">
           <div>
             <p className="eyebrow">
-              {activeProject?.genre || "长篇小说"} · {activeProject?.status || "筹备中"} ·{" "}
-              {activeProject?.defaultTone || "热血"}
+              {activeProject?.genre || "未分类"} · {activeProject?.status || "草稿"} ·{" "}
+              {activeProject?.defaultTone || "默认语气"}
             </p>
             <h1>{activeProject?.title || "AI 小说导演"}</h1>
           </div>
@@ -2169,14 +1279,14 @@ function App() {
 
         {!hasProjects && <EmptyWorkspace />}
 
-        {hasProjects && !hasLeafPage && (
+        {hasProjects && (
           <nav className="tabs">
-            <TabButton active={activeTab === "studio"} onClick={() => setActiveTab("studio")} icon={Gauge} label="创作台" />
-            <TabButton active={activeTab === "bible"} onClick={() => setActiveTab("bible")} icon={Library} label="设定库" />
-            <TabButton active={activeTab === "chapters"} onClick={() => setActiveTab("chapters")} icon={FileText} label="章节生成" />
-            <TabButton active={activeTab === "state"} onClick={() => setActiveTab("state")} icon={Clock3} label="故事状态" />
+            <TabButton active={!hasLeafPage && activeTab === "studio"} onClick={() => openPrimaryTab("studio")} icon={Gauge} label="创作台" />
+            <TabButton active={!hasLeafPage && activeTab === "bible"} onClick={() => openPrimaryTab("bible")} icon={Library} label="设定集" />
+            <TabButton active={!hasLeafPage && activeTab === "chapters"} onClick={() => openPrimaryTab("chapters")} icon={FileText} label="章节库" />
+            <TabButton active={!hasLeafPage && activeTab === "state"} onClick={() => openPrimaryTab("state")} icon={Clock3} label="故事状态" />
             <TabButton
-              active={false}
+              active={isStandaloneChapterEditor}
               onClick={() => {
                 if (!activeProject) return;
                 const chapterId = chapterWorkspace.selectedChapterId || activeProject.chapters[0]?.id || "";
@@ -2189,9 +1299,11 @@ function App() {
               icon={Edit3}
               label="章节编辑"
             />
-            <TabButton active={activeTab === "threads"} onClick={() => setActiveTab("threads")} icon={GitBranch} label="伏笔" />
-            <TabButton active={activeTab === "rewrite"} onClick={() => setActiveTab("rewrite")} icon={Wand2} label="润色/修改" />
-            <TabButton active={activeTab === "io"} onClick={() => setActiveTab("io")} icon={BrainCircuit} label="I/O记录" />
+            <TabButton active={!hasLeafPage && activeTab === "threads"} onClick={() => openPrimaryTab("threads")} icon={GitBranch} label="伏笔线程" />
+            <TabButton active={!hasLeafPage && activeTab === "rewrite"} onClick={() => openPrimaryTab("rewrite")} icon={Wand2} label="改写 / 润色" />
+            <TabButton active={!hasLeafPage && activeTab === "skills"} onClick={() => openPrimaryTab("skills")} icon={Boxes} label="Skills" />
+            <TabButton active={!hasLeafPage && activeTab === "tools"} onClick={() => openPrimaryTab("tools")} icon={BrainCircuit} label="Tools/MCP" />
+            <TabButton active={!hasLeafPage && activeTab === "io"} onClick={() => openPrimaryTab("io")} icon={BrainCircuit} label="I/O 记录" />
           </nav>
         )}
 
@@ -2210,12 +1322,21 @@ function App() {
               openSettingExtractorPage(activeProject.id, chapterId)
             }
             isNewMode={isStandaloneNewChapter}
+            buildManualChapterDraft={buildManualChapterDraft}
+            getNextChapterNumber={getNextChapterNumber}
+            findProjectById={findProjectById}
+            buildDownloadName={buildDownloadName}
+            readTextSelection={readTextSelection}
+            buildPartialRewriteSelection={buildPartialRewriteSelection}
+            formatTime={formatTime}
+            SaveIndicator={SaveIndicator}
+            DownloadFormatSelect={DownloadFormatSelect}
           />
         )}
         {activeProject && isStandaloneChapterEditor && !standaloneRouteReady && (
           <div className="center-screen">
             <Loader2 className="spin" size={24} />
-            <span>正在切换章节编辑页</span>
+            <span>正在打开章节编辑...</span>
           </div>
         )}
 
@@ -2224,9 +1345,19 @@ function App() {
             project={activeProject}
             mutate={mutate}
             working={working}
+            mcp={state?.mcp || {}}
             routeChapterId={settingExtractorRoute?.chapterId || ""}
             onBack={closeSettingExtractorPage}
             onChangeChapter={changeSettingExtractorPage}
+            buildSettingExtractionDraft={buildSettingExtractionDraft}
+            findChapterById={findChapterById}
+            buildChapterSourceText={buildChapterSourceText}
+            findLatestIoLog={findLatestIoLog}
+            buildExtractedSettingDraft={buildExtractedSettingDraft}
+            settingTypes={settingTypes}
+            ResearchTracePanel={ResearchTracePanel}
+            AgentTracePanel={AgentTracePanel}
+            describeWorkflowTrace={describeWorkflowTrace}
           />
         )}
 
@@ -2238,6 +1369,14 @@ function App() {
             streamEvents={streamEvents}
             working={working}
             setActiveTab={setActiveTab}
+            skills={state?.skills || []}
+            mcp={state?.mcp || {}}
+            ChapterGenerator={ChapterGenerator}
+            formatTime={formatTime}
+            summarizeInlineText={summarizeInlineText}
+            mapStoryStateSourceLabel={mapStoryStateSourceLabel}
+            mapStoryHeatLabel={mapStoryHeatLabel}
+            mapRelationshipKindLabel={mapRelationshipKindLabel}
           />
         )}
         {activeProject && !hasLeafPage && activeTab === "bible" && (
@@ -2248,6 +1387,12 @@ function App() {
             onOpenSettingExtractor={(chapterId = "") =>
               openSettingExtractorPage(activeProject.id, chapterId)
             }
+            settingTypes={settingTypes}
+            buildSettingDraft={buildSettingDraft}
+            sortSettings={sortSettings}
+            normalizeTagList={normalizeTagList}
+            stringifyTagList={stringifyTagList}
+            formatSettingCode={formatSettingCode}
           />
         )}
         {activeProject && !hasLeafPage && activeTab === "chapters" && (
@@ -2257,13 +1402,26 @@ function App() {
             workspace={chapterWorkspace}
             openChapterEditorPage={openChapterEditorPage}
             openBlankChapterEditorPage={openBlankChapterEditorPage}
+            formatTime={formatTime}
           />
         )}
         {activeProject && !hasLeafPage && activeTab === "state" && (
-          <StoryStateTab project={activeProject} />
+          <StoryStateTab
+            project={activeProject}
+            formatTime={formatTime}
+            summarizeInlineText={summarizeInlineText}
+            mapStoryStateSourceLabel={mapStoryStateSourceLabel}
+            mapStoryHeatLabel={mapStoryHeatLabel}
+            mapRelationshipKindLabel={mapRelationshipKindLabel}
+          />
         )}
         {activeProject && !hasLeafPage && activeTab === "threads" && (
-          <ThreadsTab project={activeProject} mutate={mutate} working={working} />
+          <ThreadsTab
+            project={activeProject}
+            mutate={mutate}
+            working={working}
+            buildForeshadowDraft={buildForeshadowDraft}
+          />
         )}
         {activeProject && !hasLeafPage && activeTab === "rewrite" && (
           <RewriteTab
@@ -2274,10 +1432,38 @@ function App() {
             workspace={chapterWorkspace}
             rewritePrefill={rewritePrefill}
             clearRewritePrefill={setRewritePrefill}
+            skills={state?.skills || []}
+            buildRewriteDraft={buildRewriteDraft}
+            buildTransformVersionLabel={buildTransformVersionLabel}
+            findLatestIoLog={findLatestIoLog}
+            rewriteStyles={rewriteStyles}
+            AgentTracePanel={AgentTracePanel}
+            describeWorkflowTrace={describeWorkflowTrace}
+          />
+        )}
+        {activeProject && !hasLeafPage && activeTab === "skills" && (
+          <SkillsTab project={activeProject} skills={state?.skills || []} />
+        )}
+        {activeProject && !hasLeafPage && activeTab === "tools" && (
+          <McpToolsTab
+            project={activeProject}
+            mcp={state?.mcp || {}}
+            mutate={mutate}
+            working={working}
+            mcpToolCall={state?.mcpToolCall || null}
+            mcpAgentRun={state?.mcpAgentRun || null}
+            buildMcpServerDraft={buildMcpServerDraft}
+            parseMcpArgs={parseMcpArgs}
+            parseJsonDraft={parseJsonDraft}
+            formatJsonBlock={formatJsonBlock}
           />
         )}
         {activeProject && !hasLeafPage && activeTab === "io" && (
-          <IoLogsTab project={activeProject} />
+          <IoLogsTab
+            project={activeProject}
+            formatTime={formatTime}
+            formatJsonBlock={formatJsonBlock}
+          />
         )}
 
         {toast && (
@@ -2295,7 +1481,7 @@ function LoadingScreen() {
   return (
     <div className="center-screen">
       <Loader2 className="spin" size={28} />
-      <span>正在载入创作工作台</span>
+      <span>正在加载应用...</span>
     </div>
   );
 }
@@ -2318,7 +1504,7 @@ function EmptyWorkspace() {
       <BookOpen size={22} />
       <div>
         <strong>还没有项目</strong>
-        <p>先在左侧创建一个小说项目，再开始设定、章节、伏笔和润色/修改协作。</p>
+        <p>先创建一个小说项目，系统会把设定、章节、状态和工作流集中管理起来。</p>
       </div>
     </div>
   );
@@ -2345,21 +1531,6 @@ function DownloadFormatSelect({ value, onChange }) {
   );
 }
 
-function ToneComposer({ value, onChange, placeholder = "输入自定义语气" }) {
-  return (
-    <div className="tone-composer">
-      <input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
-      <div className="chip-row">
-        {tonePresets.map((tone) => (
-          <button key={tone} type="button" onClick={() => onChange(tone)}>
-            {tone}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function SaveIndicator({ draft }) {
   if (!draft) return null;
   const text =
@@ -2369,7 +1540,7 @@ function SaveIndicator({ draft }) {
         ? "草稿待保存"
         : draft.status === "error"
           ? "草稿保存失败"
-          : `草稿已保存 ${formatTime(draft.lastSavedAt)}`;
+          : `草稿已保存：${formatTime(draft.lastSavedAt)}`;
 
   return (
     <span className={`save-indicator ${draft.status}`}>
@@ -2386,7 +1557,8 @@ function ProjectCreator({ onCreate, disabled }) {
     genre: "玄幻",
     premise: "",
     targetAudience: "网文新人作者",
-    defaultTone: "热血"
+    defaultTone: "热血",
+    humanizeEnabled: true
   });
 
   async function submit(event) {
@@ -2399,7 +1571,8 @@ function ProjectCreator({ onCreate, disabled }) {
       genre: "玄幻",
       premise: "",
       targetAudience: "网文新人作者",
-      defaultTone: "热血"
+      defaultTone: "热血",
+      humanizeEnabled: true
     });
   }
 
@@ -2432,6 +1605,14 @@ function ProjectCreator({ onCreate, disabled }) {
             创作台语气
             <ToneComposer value={form.defaultTone} onChange={(defaultTone) => setForm({ ...form, defaultTone })} />
           </label>
+          <label className="inline-check">
+            <input
+              type="checkbox"
+              checked={form.humanizeEnabled}
+              onChange={(event) => setForm({ ...form, humanizeEnabled: event.target.checked })}
+            />
+            默认在终稿阶段追加一轮 AI 润色
+          </label>
           <button className="primary-button" type="submit">
             创建
           </button>
@@ -2462,13 +1643,13 @@ function ProjectDangerZone({ project, mutate, working }) {
       {open && (
         <form className="stacked-form danger-card" onSubmit={submit}>
           <p>
-            删除 <strong>{project.title}</strong> 前，请输入验证码：
+            鍒犻櫎 <strong>{project.title}</strong> 鍓嶏紝璇疯緭鍏ラ獙璇佺爜锛?
           </p>
           <code>{deleteCode}</code>
           <input
             value={confirmationCode}
             onChange={(event) => setConfirmationCode(event.target.value.toUpperCase())}
-            placeholder="输入验证码确认删除"
+            placeholder="杈撳叆楠岃瘉鐮佺‘璁ゅ垹闄?"
           />
           <button
             className="danger-button"
@@ -2496,7 +1677,7 @@ function AiConfigPanel({ aiConfig, mutate, working }) {
   const [form, setForm] = useState(() => buildAiProfileDraft(activeProfile));
   const remoteEnabled = !["", "local", "mock"].includes(String(form.provider || "").trim().toLowerCase());
   const summaryParts = [
-    activeProfile?.name || "未命名配置",
+    activeProfile?.name || "鏈懡鍚嶉厤缃?",
     activeProfile?.provider || "local",
     activeProfile?.model || "local"
   ].filter(Boolean);
@@ -2588,7 +1769,7 @@ function AiConfigPanel({ aiConfig, mutate, working }) {
           </label>
           <label>
             配置名称
-            <input value={form.name} onChange={(event) => updateField("name", event.target.value)} placeholder="例如：DeepSeek Pro" />
+            <input value={form.name} onChange={(event) => updateField("name", event.target.value)} placeholder="渚嬪锛欴eepSeek Pro" />
           </label>
           <label>
             AI_PROVIDER
@@ -2604,7 +1785,7 @@ function AiConfigPanel({ aiConfig, mutate, working }) {
               type="password"
               value={form.apiKey}
               onChange={(event) => updateField("apiKey", event.target.value)}
-              placeholder="远程模型需要填写"
+              placeholder="杩滅▼妯″瀷闇€瑕佸～鍐?"
             />
           </label>
           <label>
@@ -2612,7 +1793,7 @@ function AiConfigPanel({ aiConfig, mutate, working }) {
             <input
               value={form.baseUrl}
               onChange={(event) => updateField("baseUrl", event.target.value)}
-              placeholder="例如：https://api.deepseek.com"
+              placeholder="渚嬪锛歨ttps://api.deepseek.com"
             />
           </label>
           <label>
@@ -2620,12 +1801,12 @@ function AiConfigPanel({ aiConfig, mutate, working }) {
             <input
               value={form.model}
               onChange={(event) => updateField("model", event.target.value)}
-              placeholder="例如：deepseek-v4-pro"
+              placeholder="渚嬪锛歞eepseek-v4-pro"
             />
           </label>
           <div className="form-row">
             <label>
-              思考模式
+              鎬濊€冩ā寮?
               <select value={form.thinkingMode} onChange={(event) => updateField("thinkingMode", event.target.value)} disabled={!remoteEnabled}>
                 <option value="">默认</option>
                 <option value="enabled">enabled</option>
@@ -2633,7 +1814,7 @@ function AiConfigPanel({ aiConfig, mutate, working }) {
               </select>
             </label>
             <label>
-              思考强度
+              鎬濊€冨己搴?
               <select
                 value={form.reasoningEffort}
                 onChange={(event) => updateField("reasoningEffort", event.target.value)}
@@ -2646,7 +1827,7 @@ function AiConfigPanel({ aiConfig, mutate, working }) {
             </label>
           </div>
           <small className="ai-config-hint">
-            DeepSeek `deepseek-v4-pro` 可设置 `thinking=enabled`，并用 `high` 或 `max` 控制思考强度。
+            DeepSeek `deepseek-v4-pro` 鍙缃?`thinking=enabled`锛屽苟鐢?`high` 鎴?`max` 鎺у埗鎬濊€冨己搴︺€?
           </small>
           <div className="card-actions ai-config-actions">
             <button className="primary-button" type="submit" disabled={Boolean(working)}>
@@ -2677,1157 +1858,6 @@ function AiConfigPanel({ aiConfig, mutate, working }) {
   );
 }
 
-function FieldAssist({ project, mutate, working, section, fieldLabel, value, guidance, onApply }) {
-  async function run(mode) {
-    const actionLabel = `${mode === "expand" ? "扩写" : "润色"}${fieldLabel}`;
-    const data = await mutate(
-      `/api/projects/${project.id}/assist`,
-      {
-        section,
-        fieldLabel,
-        source: value,
-        mode,
-        guidance
-      },
-      actionLabel
-    );
-    if (data.assistResult) onApply(data.assistResult);
-  }
-
-  return (
-    <div className="field-assist">
-      <button type="button" disabled={Boolean(working)} onClick={() => run("expand")}>
-        <Sparkles size={14} />
-        扩写
-      </button>
-      <button type="button" disabled={Boolean(working)} onClick={() => run("polish")}>
-        <Wand2 size={14} />
-        润色
-      </button>
-    </div>
-  );
-}
-
-function StudioTab({ project, request, mutate, streamEvents, working, setActiveTab }) {
-  const latestReport = project.reports[0];
-  const chapterCount = project.chapters.length;
-  const unresolvedThreads = project.foreshadows.filter((item) => item.status !== "已回收").length;
-  const characterCount = project.settings.filter((item) => item.type === "character").length;
-  const ioLogCount = project.ioLogs?.length || 0;
-  const stateSummary = project.storyStateSummary || {};
-  const activeStateCount = stateSummary.activeEntities?.length || 0;
-  const carryoverCount = stateSummary.carryovers?.length || 0;
-
-  return (
-    <section className="content-grid studio-grid">
-      <div className="quick-actions">
-        <button onClick={() => setActiveTab("chapters")}>
-          <Sparkles size={17} />
-          写下一章
-        </button>
-        <button onClick={() => setActiveTab("bible")}>
-          <Plus size={17} />
-          补设定
-        </button>
-        <button onClick={() => setActiveTab("threads")}>
-          <GitBranch size={17} />
-          记伏笔
-        </button>
-        <button onClick={() => setActiveTab("rewrite")}>
-          <Wand2 size={17} />
-          润色/修改正文
-        </button>
-        <button onClick={() => setActiveTab("state")}>
-          <Clock3 size={17} />
-          看故事状态
-        </button>
-        <button onClick={() => setActiveTab("io")}>
-          <BrainCircuit size={17} />
-          看 I/O 记录
-        </button>
-      </div>
-
-      <div className="overview-band">
-        <div className="metric"><span>章节</span><strong>{chapterCount}</strong></div>
-        <div className="metric"><span>设定资产</span><strong>{project.settings.length}</strong></div>
-        <div className="metric"><span>角色卡</span><strong>{characterCount}</strong></div>
-        <div className="metric"><span>未回收伏笔</span><strong>{unresolvedThreads}</strong></div>
-        <div className="metric"><span>活跃状态锚点</span><strong>{activeStateCount}</strong></div>
-        <div className="metric"><span>待承接压力</span><strong>{carryoverCount}</strong></div>
-        <div className="metric"><span>I/O 记录</span><strong>{ioLogCount}</strong></div>
-      </div>
-
-      <div className="panel chapter-engine-panel wide">
-        <div className="panel-title">
-          <div>
-            <p className="eyebrow">Chapter Cockpit</p>
-            <h2>单章驾驶舱</h2>
-          </div>
-          <Edit3 size={20} />
-        </div>
-        <ChapterGenerator project={project} request={request} mutate={mutate} streamEvents={streamEvents} working={working} compact />
-      </div>
-
-      <div className="studio-main-column">
-        <div className="panel">
-          <div className="panel-title">
-            <div>
-              <p className="eyebrow">Story State</p>
-              <h2>故事状态图</h2>
-            </div>
-            <Clock3 size={20} />
-          </div>
-          <StoryStateOverview project={project} compact />
-        </div>
-
-        <div className="panel">
-          <div className="panel-title">
-            <div>
-              <p className="eyebrow">Plot Map</p>
-              <h2>情节地图</h2>
-            </div>
-            <GitBranch size={20} />
-          </div>
-          <PlotMap project={project} />
-        </div>
-      </div>
-
-      <div className="studio-side-column">
-        <div className="panel">
-          <div className="panel-title">
-            <div>
-              <p className="eyebrow">Project Tone</p>
-              <h2>创作台语气</h2>
-            </div>
-            <Gauge size={20} />
-          </div>
-          <ProjectTonePanel project={project} mutate={mutate} working={working} />
-        </div>
-
-        <div className="panel">
-          <div className="panel-title">
-            <div>
-              <p className="eyebrow">Risk Radar</p>
-              <h2>一致性雷达</h2>
-            </div>
-            <Target size={20} />
-          </div>
-          {latestReport ? <ReportCard report={latestReport} /> : <EmptyState text="生成章节后可运行一致性检查。" />}
-          <button
-            className="secondary-button full"
-            disabled={!project.chapters.length || Boolean(working)}
-            onClick={() => mutate(`/api/projects/${project.id}/check`, {}, "检查最新章节")}
-          >
-            <CheckCircle2 size={17} />
-            检查最新章节
-          </button>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function ProjectTonePanel({ project, mutate, working }) {
-  const toneDraftKey = useMemo(() => makeWebDraftKey(project.id, "studio-tone"), [project.id]);
-  const [tone, setTone] = useWebDraftState(toneDraftKey, project.defaultTone || "热血");
-
-  async function submit(event) {
-    event.preventDefault();
-    if (!tone.trim()) return;
-    await mutate(`/api/projects/${project.id}/preferences`, { defaultTone: tone }, "保存创作台语气");
-  }
-
-  return (
-    <form className="editor-form" onSubmit={submit}>
-      <label>
-        当前默认语气
-        <ToneComposer value={tone} onChange={setTone} placeholder="例如：热血压迫感、冷感克制" />
-      </label>
-      <button className="primary-button" type="submit" disabled={Boolean(working)}>
-        <Save size={16} />
-        保存创作台语气
-      </button>
-    </form>
-  );
-}
-
-function TagInput({ value, onChange, placeholder = "输入后回车添加标签" }) {
-  const tags = normalizeTagList(value);
-  const [draft, setDraft] = useState("");
-
-  function commit(nextValue = draft) {
-    const nextTags = normalizeTagList([...tags, ...normalizeTagList(nextValue)]);
-    if (!nextTags.length && !tags.length) return;
-    onChange(stringifyTagList(nextTags));
-    setDraft("");
-  }
-
-  function removeTag(tag) {
-    onChange(stringifyTagList(tags.filter((item) => item !== tag)));
-  }
-
-  function handleKeyDown(event) {
-    if (!["Enter", ",", "，", "、", ";", "；"].includes(event.key)) return;
-    event.preventDefault();
-    if (!draft.trim()) return;
-    commit();
-  }
-
-  return (
-    <div className="tag-editor">
-      <div className="tag-editor-pills">
-        {tags.length ? (
-          tags.map((tag) => (
-            <button
-              className="tag-editor-chip"
-              key={tag}
-              type="button"
-              onClick={() => removeTag(tag)}
-              title={`移除标签 ${tag}`}
-            >
-              <span>{tag}</span>
-              <small>×</small>
-            </button>
-          ))
-        ) : (
-          <span className="tag-editor-empty">暂无标签，输入后按回车添加。</span>
-        )}
-      </div>
-      <div className="tag-editor-input">
-        <input
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder={placeholder}
-        />
-        <button type="button" onClick={() => commit()} disabled={!draft.trim()}>
-          添加
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function TagList({ value }) {
-  const tags = normalizeTagList(value);
-  if (!tags.length) return null;
-
-  return (
-    <div className="tag-list">
-      {tags.map((tag) => (
-        <span className="tag" key={tag}>
-          {tag}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-function BibleTab({ project, mutate, working, onOpenSettingExtractor }) {
-  const bibleFormKey = useMemo(() => makeWebDraftKey(project.id, "bible-form"), [project.id]);
-  const bibleQueryKey = useMemo(() => makeWebDraftKey(project.id, "bible-query"), [project.id]);
-  const bibleEditKey = useMemo(() => makeWebDraftKey(project.id, "bible-edit"), [project.id]);
-  const bibleSectionsKey = useMemo(() => makeWebDraftKey(project.id, "bible-sections"), [project.id]);
-  const [form, setForm, resetForm] = useWebDraftState(bibleFormKey, {
-    type: "character",
-    name: "",
-    summary: "",
-    traits: "",
-    rules: ""
-  });
-  const [query, setQuery] = useWebDraftState(bibleQueryKey, "");
-  const [editState, setEditState] = useWebDraftState(bibleEditKey, {
-    activeId: "",
-    expandedId: "",
-    drafts: {}
-  });
-  const [collapsedSections, setCollapsedSections] = useWebDraftState(
-    bibleSectionsKey,
-    Object.fromEntries(settingTypes.map((type) => [type.id, false]))
-  );
-  const normalizedQuery = query.trim().toLowerCase();
-  const activeEditId = editState.activeId || "";
-  const expandedId = editState.expandedId || "";
-  const editDrafts = editState.drafts || {};
-
-  async function submit(event) {
-    event.preventDefault();
-    if (!form.name.trim() || !form.summary.trim()) return;
-    await mutate(
-      `/api/projects/${project.id}/settings`,
-      { ...form, traits: stringifyTagList(form.traits) },
-      "保存设定"
-    );
-    resetForm({ type: form.type, name: "", summary: "", traits: "", rules: "" });
-  }
-
-  function startEdit(item) {
-    setCollapsedSections((current) => ({
-      ...(current || {}),
-      [item.type]: false
-    }));
-    setEditState((current) => ({
-      activeId: item.id,
-      expandedId: item.id,
-      drafts: {
-        ...(current?.drafts || {}),
-        [item.id]: current?.drafts?.[item.id] || buildSettingDraft(item)
-      }
-    }));
-  }
-
-  function collapseEdit() {
-    setEditState((current) => ({ ...current, activeId: "" }));
-  }
-
-  function resetEditDraft(item) {
-    setEditState((current) => ({
-      activeId: item.id,
-      drafts: {
-        ...(current?.drafts || {}),
-        [item.id]: buildSettingDraft(item)
-      }
-    }));
-  }
-
-  function updateEditDraft(item, patch) {
-    setEditState((current) => ({
-      activeId: item.id,
-      drafts: {
-        ...(current?.drafts || {}),
-        [item.id]: {
-          ...(current?.drafts?.[item.id] || buildSettingDraft(item)),
-          ...patch
-        }
-      }
-    }));
-  }
-
-  async function saveEdit(item) {
-    const draft = editDrafts[item.id] || buildSettingDraft(item);
-    if (!draft.name.trim() || !draft.summary.trim()) return;
-
-    await mutate(
-      `/api/projects/${project.id}/settings/${item.id}`,
-      { ...draft, traits: stringifyTagList(draft.traits) },
-      "更新设定"
-    );
-    setEditState((current) => {
-      const nextDrafts = { ...(current?.drafts || {}) };
-      delete nextDrafts[item.id];
-      return {
-        activeId: current?.activeId === item.id ? "" : current?.activeId || "",
-        expandedId: item.id,
-        drafts: nextDrafts
-      };
-    });
-  }
-
-  async function deleteSetting(item) {
-    if (!window.confirm(`确认删除设定“${item.name}”吗？此操作不可恢复。`)) return;
-
-    await mutate(`/api/projects/${project.id}/settings/${item.id}/delete`, {}, "删除设定");
-    setEditState((current) => {
-      const nextDrafts = { ...(current?.drafts || {}) };
-      delete nextDrafts[item.id];
-      return {
-        activeId: current?.activeId === item.id ? "" : current?.activeId || "",
-        expandedId: current?.expandedId === item.id ? "" : current?.expandedId || "",
-        drafts: nextDrafts
-      };
-    });
-  }
-
-  function toggleSection(sectionId) {
-    setCollapsedSections((current) => ({
-      ...(current || {}),
-      [sectionId]: !current?.[sectionId]
-    }));
-  }
-
-  function toggleSettingCard(item) {
-    setCollapsedSections((current) => ({
-      ...(current || {}),
-      [item.type]: false
-    }));
-    setEditState((current) => {
-      const isSameCard = current?.expandedId === item.id;
-      return {
-        ...current,
-        activeId: isSameCard && current?.activeId === item.id ? "" : current?.activeId || "",
-        expandedId: isSameCard ? "" : item.id,
-        drafts: current?.drafts || {}
-      };
-    });
-  }
-
-  return (
-    <section className="two-column">
-      <div className="panel">
-        <div className="panel-title">
-          <div>
-            <p className="eyebrow">Story Bible</p>
-            <h2>新增结构化设定</h2>
-          </div>
-          <div className="panel-title-actions">
-            <button className="secondary-button" type="button" onClick={() => onOpenSettingExtractor?.()}>
-              <Sparkles size={16} />
-              打开提取页
-            </button>
-            <Library size={20} />
-          </div>
-        </div>
-        <form className="editor-form" onSubmit={submit}>
-          <label>
-            类型
-            <select value={form.type} onChange={(event) => setForm({ ...form, type: event.target.value })}>
-              {settingTypes.map((type) => (
-                <option key={type.id} value={type.id}>
-                  {type.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            名称
-            <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="如：沈照夜 / 血玉 / 北境王庭" />
-            <FieldAssist
-              project={project}
-              mutate={mutate}
-              working={working}
-              section="设定库"
-              fieldLabel="名称"
-              value={form.name}
-              guidance="输出一个适合小说设定库的短名称，不加解释。"
-              onApply={(name) => setForm((current) => ({ ...current, name }))}
-            />
-          </label>
-          <label>
-            核心设定
-            <textarea
-              value={form.summary}
-              onChange={(event) => setForm({ ...form, summary: event.target.value })}
-              rows={5}
-              placeholder="这个设定在故事中的作用、限制、秘密。"
-            />
-            <FieldAssist
-              project={project}
-              mutate={mutate}
-              working={working}
-              section="设定库"
-              fieldLabel="核心设定"
-              value={form.summary}
-              guidance="写成可直接入库的设定摘要，兼顾作用、限制和秘密。"
-              onApply={(summary) => setForm((current) => ({ ...current, summary }))}
-            />
-          </label>
-          <label>
-            特征标签
-            <TagInput
-              value={form.traits}
-              onChange={(traits) => setForm((current) => ({ ...current, traits }))}
-              placeholder="输入后回车添加，如：冷静、火系、复仇"
-            />
-            <FieldAssist
-              project={project}
-              mutate={mutate}
-              working={working}
-              section="设定库"
-              fieldLabel="特征标签"
-              value={form.traits}
-              guidance="输出 3 到 6 个短标签，用顿号分隔。"
-              onApply={(traits) => setForm((current) => ({ ...current, traits: stringifyTagList(traits) }))}
-            />
-          </label>
-          <label>
-            禁忌 / 不可违背
-            <textarea value={form.rules} onChange={(event) => setForm({ ...form, rules: event.target.value })} rows={3} placeholder="后续生成必须遵守的硬规则。" />
-            <FieldAssist
-              project={project}
-              mutate={mutate}
-              working={working}
-              section="设定库"
-              fieldLabel="禁忌/不可违背"
-              value={form.rules}
-              guidance="输出可执行的硬规则，避免含糊。"
-              onApply={(rules) => setForm((current) => ({ ...current, rules }))}
-            />
-          </label>
-          <button className="primary-button" disabled={Boolean(working)} type="submit">
-            <Plus size={17} />
-            加入设定库
-          </button>
-        </form>
-      </div>
-
-      <div className="asset-list">
-        <div className="list-toolbar">
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索角色、道具、地点或规则" />
-        </div>
-        {settingTypes.map((type) => {
-          const Icon = type.icon;
-          const items = sortSettings(project.settings).filter((item) => {
-            if (item.type !== type.id) return false;
-            if (item.id === activeEditId) return true;
-            if (!normalizedQuery) return true;
-            return [item.name, item.summary, item.traits, item.rules].some((value) =>
-              String(value || "").toLowerCase().includes(normalizedQuery)
-            );
-          });
-          const isCollapsed = Boolean(collapsedSections[type.id]) && !normalizedQuery;
-
-          return (
-            <div className="panel" key={type.id}>
-              <div className="panel-title compact">
-                <h2><Icon size={18} />{type.label}</h2>
-                <div className="panel-title-actions">
-                  <span>{items.length}</span>
-                  <button
-                    className="section-toggle"
-                    type="button"
-                    aria-expanded={!isCollapsed}
-                    aria-label={`${isCollapsed ? "展开" : "收起"}${type.label}`}
-                    onClick={() => toggleSection(type.id)}
-                  >
-                    <ChevronRight size={16} />
-                    {isCollapsed ? "展开" : "收起"}
-                  </button>
-                </div>
-              </div>
-              {isCollapsed && items.length ? (
-                <div className="collapsed-hint">已折叠，点击展开查看该分类下的设定。</div>
-              ) : items.length ? (
-                <div className="cards setting-card-grid">
-                  {items.map((item) => {
-                    const isEditing = activeEditId === item.id;
-                    const isExpanded = isEditing || expandedId === item.id;
-                    const editDraft = editDrafts[item.id] || buildSettingDraft(item);
-
-                    return (
-                      <article className={`asset-card setting-card ${isExpanded ? "expanded" : ""} ${isEditing ? "editing" : ""}`} key={item.id}>
-                        <button
-                          className="setting-card-toggle"
-                          type="button"
-                          aria-expanded={isExpanded}
-                          onClick={() => toggleSettingCard(item)}
-                        >
-                          <div className="setting-card-heading">
-                            <span className="setting-code-badge">{formatSettingCode(item)}</span>
-                            <h3>{item.name}</h3>
-                          </div>
-                          <div className="setting-card-meta">
-                            <small>
-                              {isExpanded
-                                ? "\u6536\u8d77\u8be6\u60c5"
-                                : item.rules
-                                  ? "\u542b\u89c4\u5219\u7ea6\u675f"
-                                  : "\u70b9\u51fb\u5c55\u5f00\u8be6\u60c5"}
-                            </small>
-                            <ChevronRight size={16} />
-                          </div>
-                        </button>
-                        {isEditing ? (
-                          <form
-                            className="editor-form"
-                            onSubmit={(event) => {
-                              event.preventDefault();
-                              saveEdit(item).catch(() => {});
-                            }}
-                          >
-                            <label>
-                              类型
-                              <select value={editDraft.type} onChange={(event) => updateEditDraft(item, { type: event.target.value })}>
-                                {settingTypes.map((settingType) => (
-                                  <option key={settingType.id} value={settingType.id}>
-                                    {settingType.label}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                            <label>
-                              名称
-                              <input value={editDraft.name} onChange={(event) => updateEditDraft(item, { name: event.target.value })} />
-                            </label>
-                            <label>
-                              核心设定
-                              <textarea value={editDraft.summary} onChange={(event) => updateEditDraft(item, { summary: event.target.value })} rows={5} />
-                            </label>
-                            <label>
-                              特征标签
-                              <TagInput
-                                value={editDraft.traits}
-                                onChange={(traits) => updateEditDraft(item, { traits })}
-                                placeholder="输入后回车添加标签"
-                              />
-                            </label>
-                            <label>
-                              禁忌 / 不可违背
-                              <textarea value={editDraft.rules} onChange={(event) => updateEditDraft(item, { rules: event.target.value })} rows={3} />
-                            </label>
-                            <div className="card-actions">
-                              <button className="primary-button" type="submit" disabled={Boolean(working)}>
-                                <Save size={16} />
-                                保存修改
-                              </button>
-                              <button
-                                className="danger-button"
-                                type="button"
-                                disabled={Boolean(working)}
-                                onClick={() => deleteSetting(item)}
-                              >
-                                <Trash2 size={16} />
-                                删除设定
-                              </button>
-                              <button className="secondary-button" type="button" disabled={Boolean(working)} onClick={() => resetEditDraft(item)}>
-                                重置草稿
-                              </button>
-                              <button className="secondary-button" type="button" onClick={collapseEdit}>
-                                收起编辑
-                              </button>
-                            </div>
-                          </form>
-                        ) : (
-                          isExpanded && (
-                            <div className="setting-card-body">
-                              <p>{item.summary}</p>
-                              <TagList value={item.traits} />
-                              {item.rules && <small>{item.rules}</small>}
-                              <div className="card-actions">
-                                <button className="secondary-button" type="button" onClick={() => startEdit(item)}>
-                                  <Edit3 size={16} />
-                                  编辑设定
-                                </button>
-                                <button className="danger-button" type="button" disabled={Boolean(working)} onClick={() => deleteSetting(item)}>
-                                  <Trash2 size={16} />
-                                  删除设定
-                                </button>
-                              </div>
-                            </div>
-                          )
-                        )}
-                      </article>
-                    );
-                  })}
-                </div>
-              ) : (
-                <EmptyState text="暂无条目。" />
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </section>
-  );
-}
-
-function ChapterEditorPanel({
-  project,
-  mutate,
-  working,
-  selectedChapter,
-  selectedDraft,
-  updateDraft,
-  saveDraft,
-  saveChapter,
-  downloadChapter,
-  chapterDownloadFormat,
-  setChapterDownloadFormat,
-  onRewriteSelection,
-  onOpenSettingExtractor
-}) {
-  const editorRef = useRef(null);
-  const [selectionRange, setSelectionRange] = useState({ start: 0, end: 0 });
-  const selectedLength = Math.max(0, selectionRange.end - selectionRange.start);
-
-  useEffect(() => {
-    setSelectionRange({ start: 0, end: 0 });
-  }, [selectedChapter?.id]);
-
-  useEffect(() => {
-    if (typeof document === "undefined") return undefined;
-
-    function syncSelectionFromDocument() {
-      if (!editorRef.current) return;
-      if (document.activeElement !== editorRef.current) return;
-      setSelectionRange(readTextSelection(editorRef.current, selectedDraft?.content.length || 0));
-    }
-
-    document.addEventListener("selectionchange", syncSelectionFromDocument);
-    return () => document.removeEventListener("selectionchange", syncSelectionFromDocument);
-  }, [selectedDraft?.content.length]);
-
-  function syncSelectionRange(event) {
-    const target = event?.target || editorRef.current;
-    if (!target) return;
-    setSelectionRange(readTextSelection(target, selectedDraft?.content.length || 0));
-  }
-
-  function sendSelectionToRewrite() {
-    if (!selectedChapter || !selectedDraft) return;
-    const selection = buildPartialRewriteSelection({
-      chapter: selectedChapter,
-      content: selectedDraft.content,
-      start: selectionRange.start,
-      end: selectionRange.end
-    });
-    if (!selection) return;
-    onRewriteSelection?.(selection);
-  }
-
-  return (
-    <div className="panel chapter-editor-panel">
-      {selectedChapter && selectedDraft ? (
-        <>
-          <div className="panel-title">
-            <div>
-              <p className="eyebrow">Full Editor</p>
-              <h2>章节全文编辑器</h2>
-            </div>
-            <div className="toolbar-wrap">
-              <SaveIndicator draft={selectedDraft} />
-              {onOpenSettingExtractor && (
-                <button className="secondary-button" disabled={Boolean(working)} onClick={onOpenSettingExtractor}>
-                  <Library size={16} />
-                  提取设定
-                </button>
-              )}
-              <DownloadFormatSelect
-                value={chapterDownloadFormat}
-                onChange={setChapterDownloadFormat}
-              />
-              <button className="secondary-button" disabled={Boolean(working)} onClick={() => downloadChapter()}>
-                <Download size={16} />
-                下载当前章节
-              </button>
-              <button className="secondary-button" disabled={Boolean(working)} onClick={() => saveDraft(selectedChapter.id, { silent: false })}>
-                <Save size={16} />
-                立即保存草稿
-              </button>
-              <button className="primary-button" disabled={Boolean(working)} onClick={() => saveChapter(selectedChapter.id)}>
-                <Save size={16} />
-                手动保存正式稿
-              </button>
-              <button
-                className="secondary-button"
-                disabled={Boolean(working)}
-                onClick={() => mutate(`/api/projects/${project.id}/chapters/${selectedChapter.id}/check`, {}, "检查章节")}
-              >
-                <CheckCircle2 size={16} />
-                检查
-              </button>
-              <button
-                className="secondary-button"
-                disabled={Boolean(working) || !selectedLength}
-                onClick={sendSelectionToRewrite}
-              >
-                <Wand2 size={16} />
-                局部润色/修改
-              </button>
-            </div>
-          </div>
-
-          <div className="editor-meta-grid">
-            <label>
-              章节标题
-              <input
-                value={selectedDraft.title}
-                onChange={(event) => updateDraft(selectedChapter.id, { title: event.target.value })}
-                placeholder={`第 ${selectedChapter.number} 章标题`}
-              />
-            </label>
-            <label>
-              章节语气
-              <ToneComposer
-                value={selectedDraft.tone}
-                onChange={(tone) => updateDraft(selectedChapter.id, { tone })}
-                placeholder="例如：冷感压迫、轻快群像"
-              />
-            </label>
-          </div>
-
-          <div className="chapter-outline">
-            {selectedChapter.beats.map((beat) => (
-              <span key={beat}>{beat}</span>
-            ))}
-          </div>
-
-          <label>
-            正文全文
-            <textarea
-              ref={editorRef}
-              className="chapter-editor-textarea"
-              value={selectedDraft.content}
-              onChange={(event) => updateDraft(selectedChapter.id, { content: event.target.value })}
-              onFocus={syncSelectionRange}
-              onKeyUp={syncSelectionRange}
-              onMouseUp={syncSelectionRange}
-              onSelect={syncSelectionRange}
-              placeholder="在这里直接编辑本章全文，自动保存会记录为草稿，手动保存会写入正式正文。"
-            />
-          </label>
-
-          <div className="editor-footer">
-            <span>正式稿最后更新：{formatTime(selectedChapter.updatedAt || selectedChapter.createdAt)}</span>
-            <span>当前草稿字数：{selectedDraft.content.trim().length}</span>
-            <span>{selectedLength ? `当前已选中 ${selectedLength} 字，可直接送去局部润色或修改` : "先在正文里选中一段，再点“局部润色/修改”"}</span>
-          </div>
-        </>
-      ) : (
-        <EmptyState text="选择一章开始编辑。" />
-      )}
-    </div>
-  );
-}
-
-function ChapterVersionPanel({ selectedChapter, restoreVersion }) {
-  return (
-    <aside className="panel version-panel">
-      <div className="panel-title compact">
-        <h2>版本记录</h2>
-        <span>{selectedChapter?.versions?.length || 0}</span>
-      </div>
-      {selectedChapter?.versions?.length ? (
-        <div className="version-list">
-          {selectedChapter.versions.map((version) => (
-            <article className="version-card" key={version.id}>
-              <header>
-                <strong>{version.style || version.source}</strong>
-                <span>{formatTime(version.createdAt)}</span>
-              </header>
-              <small>{version.source} · {version.tone}</small>
-              <p>
-                {version.content.slice(0, 120)}
-                {version.content.length > 120 ? "..." : ""}
-              </p>
-              <button className="secondary-button" type="button" onClick={() => restoreVersion(selectedChapter.id, version)}>
-                载入编辑器
-              </button>
-            </article>
-          ))}
-        </div>
-      ) : (
-        <EmptyState text="还没有章节版本。" />
-      )}
-    </aside>
-  );
-}
-
-function ChapterDirectoryPanel({ project, selectedChapterId, onChangeChapter }) {
-  const chapters = project.chapters || [];
-
-  return (
-    <aside className="panel chapter-directory-panel">
-      <div className="panel-title compact">
-        <div>
-          <p className="eyebrow">目录</p>
-          <h2>章节目录</h2>
-        </div>
-        <span>{chapters.length}</span>
-      </div>
-      <p className="chapter-page-note">
-        从这里切换要编辑的章节。左侧目录会保持当前项目下的章节顺序，方便连续修稿。
-      </p>
-      <div className="chapter-nav">
-        {chapters.length ? (
-          chapters.map((chapter) => (
-            <button
-              key={chapter.id}
-              className={`chapter-nav-item ${chapter.id === selectedChapterId ? "active" : ""}`}
-              type="button"
-              onClick={() => onChangeChapter(chapter.id)}
-            >
-              <div>
-                <span>第 {chapter.number} 章</span>
-                <strong>{chapter.title}</strong>
-              </div>
-              <small>{chapter.beats?.length || 0} 个情节点</small>
-            </button>
-          ))
-        ) : (
-          <div className="chapter-directory-empty">
-            <EmptyState text="当前项目还没有章节，先创建一个空白章节再开始编辑。" />
-          </div>
-        )}
-      </div>
-    </aside>
-  );
-}
-
-function ManualChapterDraftEditor({ project, mutate, working, onCreatedChapter, standalone = false }) {
-  const manualDraftKey = useMemo(() => makeWebDraftKey(project.id, "manual-chapter-draft"), [project.id]);
-  const [draft, setDraft, resetDraft] = useWebDraftState(manualDraftKey, buildManualChapterDraft(project));
-  const nextChapterNumber = getNextChapterNumber(project);
-
-  async function createManualChapter() {
-    const data = await mutate(`/api/projects/${project.id}/chapters/manual`, draft, "创建空白章节");
-    if (data.pendingGenerationSessionId) {
-      return;
-    }
-    const nextProject = findProjectById(data, project.id) || project;
-    const createdChapterId =
-      data.createdChapterId || nextProject.chapters[nextProject.chapters.length - 1]?.id || "";
-
-    resetDraft(buildManualChapterDraft(nextProject));
-    if (createdChapterId) {
-      onCreatedChapter?.(createdChapterId);
-    }
-  }
-
-  return (
-    <div className={`panel ${standalone ? "chapter-editor-panel" : "manual-chapter-panel"}`}>
-      <div className="panel-title">
-        <div>
-          <p className="eyebrow">{standalone ? "Standalone Draft" : "Manual Draft"}</p>
-          <h2>{standalone ? "空白章节编辑" : "空白章节编辑器"}</h2>
-        </div>
-        <div className="toolbar-wrap">
-          <span className="draft-hint">本地草稿实时保存</span>
-          <button className="secondary-button" type="button" disabled={Boolean(working)} onClick={() => resetDraft(buildManualChapterDraft(project))}>
-            清空草稿
-          </button>
-          <button className="primary-button" type="button" disabled={Boolean(working)} onClick={createManualChapter}>
-            <Save size={16} />
-            保存为第 {nextChapterNumber} 章
-          </button>
-        </div>
-      </div>
-
-      <div className="editor-meta-grid">
-        <label>
-          章节标题
-          <input
-            value={draft.title}
-            onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
-            placeholder={`例如：古灯初燃（不填则保存为第 ${nextChapterNumber} 章）`}
-          />
-        </label>
-        <label>
-          章节语气
-          <ToneComposer
-            value={draft.tone}
-            onChange={(tone) => setDraft((current) => ({ ...current, tone }))}
-            placeholder="例如：冷感压迫、轻快群像"
-          />
-        </label>
-      </div>
-
-      <label>
-        正文全文
-        <textarea
-          className="chapter-editor-textarea"
-          value={draft.content}
-          onChange={(event) => setDraft((current) => ({ ...current, content: event.target.value }))}
-          placeholder="这里可以直接手写空白章节，不需要先 AI 生成。保存后会创建正式章节并进入普通章节工作流。"
-        />
-      </label>
-      <div className="editor-footer">
-        <span>系统会自动保存为第 {nextChapterNumber} 章，标题里不需要再写章号</span>
-        <span>当前草稿字数：{draft.content.trim().length}</span>
-      </div>
-    </div>
-  );
-}
-
-function ChapterEditorPage({
-  project,
-  mutate,
-  working,
-  workspace,
-  downloadBinary,
-  onBack,
-  onChangeChapter,
-  onCreateChapter,
-  onRewriteSelection,
-  onOpenSettingExtractor,
-  isNewMode = false
-}) {
-  const {
-    selectedChapter,
-    selectedChapterId,
-    selectedDraft,
-    setSelectedChapterId,
-    updateDraft,
-    saveDraft,
-    saveChapter,
-    restoreVersion
-  } = workspace;
-  const chapterDownloadKey = useMemo(() => makeWebDraftKey(project.id, "chapter-download-format"), [project.id]);
-  const [chapterDownloadFormat, setChapterDownloadFormat] = useWebDraftState(chapterDownloadKey, "markdown");
-
-  async function downloadChapter() {
-    if (!selectedChapter) return;
-    await downloadBinary(
-      `/api/projects/${project.id}/chapters/${selectedChapter.id}/export?format=${encodeURIComponent(chapterDownloadFormat)}`,
-      buildDownloadName(`第${selectedChapter.number}章-${selectedChapter.title}`, chapterDownloadFormat),
-      "下载当前章节"
-    );
-  }
-
-  function handleChapterChange(chapterId) {
-    setSelectedChapterId(chapterId);
-    onChangeChapter(chapterId);
-  }
-
-  return (
-    <section className="chapter-page">
-      <div className="panel chapter-page-header">
-        <div>
-          <p className="eyebrow">章节编辑</p>
-          <h2>
-            {isNewMode
-              ? "空白章节编辑"
-              : selectedChapter
-                ? `第 ${selectedChapter.number} 章 · 章节编辑`
-                : "章节编辑"}
-          </h2>
-          <p className="chapter-page-note">
-            {isNewMode
-              ? "这里不依赖 AI 生成，可以直接手写新章节并保存入库。"
-              : "这里是章节编辑子页面，专门用于单章全文编辑和版本管理。"}
-          </p>
-        </div>
-        <div className="chapter-page-toolbar">
-          <button className="secondary-button" type="button" onClick={onBack}>
-            返回章节生成
-          </button>
-        </div>
-      </div>
-
-      <div className="chapter-page-grid">
-        <ChapterDirectoryPanel
-          project={project}
-          selectedChapterId={isNewMode ? "" : selectedChapterId}
-          onChangeChapter={handleChapterChange}
-        />
-        {isNewMode ? (
-          <ManualChapterDraftEditor
-            project={project}
-            mutate={mutate}
-            working={working}
-            standalone
-            onCreatedChapter={onCreateChapter}
-          />
-        ) : (
-          <ChapterEditorPanel
-            project={project}
-            mutate={mutate}
-            working={working}
-            selectedChapter={selectedChapter}
-            selectedDraft={selectedDraft}
-            updateDraft={updateDraft}
-            saveDraft={saveDraft}
-            saveChapter={saveChapter}
-            downloadChapter={downloadChapter}
-            chapterDownloadFormat={chapterDownloadFormat}
-            setChapterDownloadFormat={setChapterDownloadFormat}
-            onRewriteSelection={onRewriteSelection}
-            onOpenSettingExtractor={() =>
-              selectedChapter && onOpenSettingExtractor?.(selectedChapter.id)
-            }
-          />
-        )}
-        {isNewMode ? (
-          <div className="panel version-panel">
-            <EmptyState text="保存为正式章节后，这里会显示版本记录。" />
-          </div>
-        ) : (
-          <ChapterVersionPanel selectedChapter={selectedChapter} restoreVersion={restoreVersion} />
-        )}
-      </div>
-    </section>
-  );
-}
-
-function ChapterGenerationPage({
-  project,
-  working,
-  workspace,
-  openChapterEditorPage,
-  openBlankChapterEditorPage
-}) {
-  const { selectedChapter } = workspace;
-
-  function openCurrentChapterEditor() {
-    if (!project?.id) return;
-    const chapterId = selectedChapter?.id || project.chapters[0]?.id || "";
-    if (chapterId) {
-      openChapterEditorPage(project.id, chapterId);
-      return;
-    }
-    openBlankChapterEditorPage(project.id);
-  }
-
-  return (
-    <section className="chapter-page">
-      <div className="panel chapter-page-header">
-        <div>
-          <p className="eyebrow">章节生成</p>
-          <h2>章节生成</h2>
-          <p className="chapter-page-note">
-            章节生成工作台已经迁到「创作台」里的单章驾驶舱。这里保留章节概览和跳转入口，方便你直接切到编辑页。
-          </p>
-        </div>
-        <div className="chapter-page-toolbar">
-          <button className="secondary-button" type="button" disabled={Boolean(working)} onClick={openCurrentChapterEditor}>
-            <Edit3 size={16} />
-            打开章节编辑
-          </button>
-          <button className="secondary-button" type="button" disabled={Boolean(working)} onClick={() => openBlankChapterEditorPage(project.id)}>
-            <Plus size={16} />
-            新建空白章节
-          </button>
-        </div>
-      </div>
-
-      <div className="chapter-page-grid chapter-generation-overview-grid">
-        <div className="panel chapter-generation-panel">
-          <div className="panel-title">
-            <div>
-              <p className="eyebrow">章节概览</p>
-              <h2>最近章节与目录</h2>
-            </div>
-            <FileText size={20} />
-          </div>
-          {project.chapters.length ? (
-            <div className="chapter-generation-summary">
-              <div className="editor-footer">
-                <span>章节总数：{project.chapters.length}</span>
-                <span>最近更新：{formatTime(project.chapters[0]?.updatedAt || project.chapters[0]?.createdAt)}</span>
-              </div>
-              <PlotMap project={project} />
-            </div>
-          ) : (
-            <EmptyState text="当前项目还没有章节。先创建空白章节，再到章节编辑页继续补全正文。" />
-          )}
-        </div>
-
-        <div className="panel chapter-generation-panel">
-          <div className="panel-title">
-            <div>
-              <p className="eyebrow">快捷入口</p>
-              <h2>进入章节编辑</h2>
-            </div>
-            <Edit3 size={20} />
-          </div>
-          <p className="chapter-page-note">
-            需要连续修稿、切章编辑或查看版本时，直接进入章节编辑页。那里有左侧目录、中间正文和右侧版本记录。
-          </p>
-          <div className="standalone-entry-actions">
-            <button className="primary-button" type="button" disabled={Boolean(working)} onClick={openCurrentChapterEditor}>
-              <FileText size={16} />
-              打开当前章节
-            </button>
-            <button className="secondary-button" type="button" disabled={Boolean(working)} onClick={() => openBlankChapterEditorPage(project.id)}>
-              <Plus size={16} />
-              直接新建空白章节
-            </button>
-          </div>
-        </div>
-      </div>
-    </section>
-  );
-}
-
 function SettingSelector({ project, value, onChange }) {
   const normalizedValue = normalizeSettingSelection(value, project);
   const selectedIds = new Set(normalizedValue);
@@ -3851,19 +1881,19 @@ function SettingSelector({ project, value, onChange }) {
   return (
     <div className="setting-selector">
       <div className="setting-selector-header">
-        <strong>本章带入设定</strong>
+        <strong>关联设定</strong>
         <div className="setting-selector-actions">
-          <span>{hasSelection ? `已选 ${normalizedValue.length} 条` : `默认全部 ${orderedSettings.length} 条`}</span>
+          <span>{hasSelection ? `已选 ${normalizedValue.length} 项` : `共计 ${orderedSettings.length} 项`}</span>
           <button type="button" onClick={() => onChange(orderedSettings.map((item) => item.id))}>
             全选
           </button>
           <button type="button" disabled={!hasSelection} onClick={() => onChange([])}>
-            恢复默认
+            清空
           </button>
         </div>
       </div>
       <p className="setting-selector-note">
-        不勾选时，系统会把全部设定带入章节生成。开始勾选后，只会使用你选中的条目。
+        这些设定会进入本章上下文，影响约束草稿、Planner、Writer 和 Guard 的判断。
       </p>
       {groups.length ? (
         groups.map((group) => (
@@ -3884,7 +1914,7 @@ function SettingSelector({ project, value, onChange }) {
           </div>
         ))
       ) : (
-        <div className="setting-selector-empty">暂无可选设定。</div>
+        <div className="setting-selector-empty">当前还没有可选设定。</div>
       )}
     </div>
   );
@@ -3896,6 +1926,7 @@ function ChapterGenerator({
   mutate,
   streamEvents,
   working,
+  mcp = {},
   selectedChapter = null,
   onCreatedChapter,
   onOpenStandalone,
@@ -3942,6 +1973,9 @@ function ChapterGenerator({
   const workflowLastRun = workflowState.lastRun;
   const workflowEditorMode = workflowState.editorMode || "simple";
   const ignoredFindingKeys = workflowState.ignoredFindingKeys || [];
+  const readyMcpServers = Array.isArray(mcp?.servers)
+    ? mcp.servers.filter((item) => item.status === "ready")
+    : [];
   const pendingReviewSession = useMemo(() => {
     const sessions = project.generationSessions || [];
     if (!sessions.length) return null;
@@ -3989,32 +2023,54 @@ function ChapterGenerator({
       }),
     [project, isRegenerateMode, selectedChapter?.id]
   );
+  const latestWorkflowResearchLog = useMemo(
+    () =>
+      findLatestIoLog(project, {
+        workflows: isRegenerateMode
+          ? ["chapter_regenerate", "chapter_regenerate_preview"]
+          : ["chapter_generate", "chapter_preview"],
+        stages: ["mcp_research"],
+        chapterId: selectedChapter?.id || ""
+      }),
+    [project, isRegenerateMode, selectedChapter?.id]
+  );
+  const latestWorkflowSubagentLog = useMemo(
+    () =>
+      findLatestIoLog(project, {
+        workflows: isRegenerateMode
+          ? ["chapter_regenerate", "chapter_regenerate_preview"]
+          : ["chapter_generate", "chapter_preview"],
+        stages: ["subagents"],
+        chapterId: selectedChapter?.id || ""
+      }),
+    [project, isRegenerateMode, selectedChapter?.id]
+  );
 
   const templates = [
     {
       label: "升级爆点",
       value: {
-        goal: "让主角在明确代价下完成一次能力突破，并拿到下一阶段地图线索。",
-        conflict: "对手用规则压制主角，逼他在暴露底牌和失去资格之间选择。",
-        hook: "裁判席上，有人念出了主角早该被抹去的旧名。",
+        goal: "璁╀富瑙掑湪鏄庣‘浠ｄ环涓嬪畬鎴愪竴娆¤兘鍔涚獊鐮达紝骞舵嬁鍒颁笅涓€闃舵鍦板浘绾跨储銆?",
+        conflict: "瀵规墜鐢ㄨ鍒欏帇鍒朵富瑙掞紝閫间粬鍦ㄦ毚闇插簳鐗屽拰澶卞幓璧勬牸涔嬮棿閫夋嫨銆?",
+        hook: "瑁佸垽甯笂锛屾湁浜哄康鍑轰簡涓昏鏃╄琚姽鍘荤殑鏃у悕銆?",
         tone: "热血"
       }
     },
     {
       label: "情绪拉扯",
       value: {
-        goal: "推进两名核心人物的信任关系，同时埋下误会的反向证据。",
-        conflict: "女主发现主角隐瞒关键信息，却又不得不和他共同脱身。",
-        hook: "她把那枚信物放回主角掌心，只说了一句：你最好别让我查到真相。",
+        goal: "鎺ㄨ繘涓ゅ悕鏍稿績浜虹墿鐨勪俊浠诲叧绯伙紝鍚屾椂鍩嬩笅璇細鐨勫弽鍚戣瘉鎹€?",
+        conflict: "濂充富鍙戠幇涓昏闅愮瀿鍏抽敭淇℃伅锛屽嵈鍙堜笉寰椾笉鍜屼粬鍏卞悓鑴辫韩銆?",
+        hook: "濂规妸閭ｆ灇淇＄墿鏀惧洖涓昏鎺屽績锛屽彧璇翠簡涓€鍙ワ細浣犳渶濂藉埆璁╂垜鏌ュ埌鐪熺浉銆?",
         tone: "暧昧拉扯"
       }
     },
     {
       label: "悬疑反转",
       value: {
-        goal: "揭开一个旧案细节，但让真相指向更危险的幕后人。",
-        conflict: "线索互相矛盾，唯一证人说出的版本和设定库记录完全相反。",
-        hook: "尸体袖口里，露出一张写着主角名字的请柬。",
+        goal: "鎻紑涓€涓棫妗堢粏鑺傦紝浣嗚鐪熺浉鎸囧悜鏇村嵄闄╃殑骞曞悗浜恒€?",
+        conflict: "绾跨储浜掔浉鐭涚浘锛屽敮涓€璇佷汉璇村嚭鐨勭増鏈拰璁惧畾搴撹褰曞畬鍏ㄧ浉鍙嶃€?",
+        hook: "灏镐綋琚栧彛閲岋紝闇插嚭涓€寮犲啓鐫€涓昏鍚嶅瓧鐨勮鏌€?",
         tone: "悬疑感强"
       }
     }
@@ -4025,6 +2081,40 @@ function ChapterGenerator({
       setMode("next");
     }
   }, [mode, selectedChapter, setMode]);
+
+  useEffect(() => {
+    const validIds = new Set(readyMcpServers.map((item) => item.id));
+    setNextForm((current) => {
+      const selected = (current.selectedMcpServerIds || []).filter((item) => validIds.has(item));
+      const nextUseMcp = current.useMcp && validIds.size > 0;
+      if (
+        selected.length === (current.selectedMcpServerIds || []).length &&
+        nextUseMcp === current.useMcp
+      ) {
+        return current;
+      }
+      return {
+        ...current,
+        useMcp: nextUseMcp,
+        selectedMcpServerIds: selected
+      };
+    });
+    setRegenerateForm((current) => {
+      const selected = (current.selectedMcpServerIds || []).filter((item) => validIds.has(item));
+      const nextUseMcp = current.useMcp && validIds.size > 0;
+      if (
+        selected.length === (current.selectedMcpServerIds || []).length &&
+        nextUseMcp === current.useMcp
+      ) {
+        return current;
+      }
+      return {
+        ...current,
+        useMcp: nextUseMcp,
+        selectedMcpServerIds: selected
+      };
+    });
+  }, [JSON.stringify(readyMcpServers), setNextForm, setRegenerateForm]);
 
   useEffect(() => {
     setRuntimeState(buildWorkflowRuntimeState());
@@ -4066,6 +2156,9 @@ function ChapterGenerator({
       tone: form.tone,
       wordCount: Number(form.wordCount || 1800),
       selectedSettingIds: normalizeSettingSelection(form.selectedSettingIds || [], project),
+      useMcp: form.useMcp && readyMcpServers.length > 0,
+      useSubagents: form.useSubagents === true,
+      selectedServerIds: form.useMcp ? form.selectedMcpServerIds : [],
       constraintPolicy: normalizeConstraintPolicyDraft(form.constraintPolicy),
       chapterId: isRegenerateMode ? selectedChapter?.id || "" : ""
     };
@@ -4236,7 +2329,7 @@ function ChapterGenerator({
       {
         content: reviewContent
       },
-      isRegenerateMode ? "保存重生成章节" : "保存生成章节"
+      isRegenerateMode ? "确认重生成审阅稿" : "确认生成审阅稿"
     );
 
     setWorkflowState((current) => ({
@@ -4256,10 +2349,10 @@ function ChapterGenerator({
         await mutate(
           `/api/projects/${project.id}/chapters/${selectedChapter.id}/check`,
           {},
-          "检查当前章节"
+          "妫€鏌ュ綋鍓嶇珷鑺?"
         );
       } else {
-        await mutate(`/api/projects/${project.id}/check`, {}, "检查最新章节");
+        await mutate(`/api/projects/${project.id}/check`, {}, "妫€鏌ユ渶鏂扮珷鑺?");
       }
     }
 
@@ -4284,7 +2377,7 @@ function ChapterGenerator({
     await mutate(
       `/api/projects/${project.id}/generation-sessions/${pendingReviewSession.id}/discard`,
       {},
-      "丢弃审阅稿"
+      "涓㈠純瀹￠槄绋?"
     );
     setWorkflowState((current) => ({
       ...current,
@@ -4345,7 +2438,7 @@ function ChapterGenerator({
         await mutate(
           `/api/projects/${project.id}/chapters/${selectedChapter.id}/check`,
           {},
-          "检查当前章节"
+          "妫€鏌ュ綋鍓嶇珷鑺?"
         );
       }
       if (!data.pendingGenerationSessionId) {
@@ -4380,7 +2473,7 @@ function ChapterGenerator({
       reviewDirty: false
     }));
     if (autoCheck && !data.pendingGenerationSessionId) {
-      await mutate(`/api/projects/${project.id}/check`, {}, "检查最新章节");
+      await mutate(`/api/projects/${project.id}/check`, {}, "妫€鏌ユ渶鏂扮珷鑺?");
     }
     if (data.pendingGenerationSessionId) {
       return;
@@ -4405,7 +2498,8 @@ function ChapterGenerator({
   }
 
   return (
-    <form className={`generator-form ${compact ? "compact" : ""}`} onSubmit={submit}>
+    <>
+      <form className={`generator-form ${compact ? "compact" : ""}`} onSubmit={submit}>
       <div className="panel-title compact generator-header">
         <div>
           <p className="eyebrow">章节生成</p>
@@ -4426,18 +2520,24 @@ function ChapterGenerator({
           disabled={!selectedChapter}
           onClick={() => selectedChapter && setMode("selected")}
         >
-          {selectedChapter ? `重生成第 ${selectedChapter.number} 章` : "先选章节后重生成"}
+          {selectedChapter ? `重生成第 ${selectedChapter.number} 章` : "请选择要重生成的章节"}
         </button>
       </div>
       {isRegenerateMode && selectedChapter && (
         <div className="selection-callout">
           <strong>
-            当前将重生成第 {selectedChapter.number} 章 · {selectedChapter.title}
+            正在重生成第 {selectedChapter.number} 章：{selectedChapter.title}
           </strong>
-          <span>提交后会覆盖这一章，并先把当前内容自动备份到版本记录。</span>
+          <span>会沿用当前工作流配置，并以审阅稿模式返回结果。</span>
         </div>
       )}
-      <ChapterTaskFlow preview={workflowPreview} workflow={workflowResult} reviewSession={pendingReviewSession} runtime={runtimeState} />
+      <ChapterTaskFlow
+        preview={workflowPreview}
+        workflow={workflowResult}
+        reviewSession={pendingReviewSession}
+        runtime={runtimeState}
+        aggregateRuntimeStepState={aggregateRuntimeStepState}
+      />
       <WorkflowActionBanner recommendation={workflowRecommendation} />
       <div className="template-row">
         {templates.map((template) => (
@@ -4451,7 +2551,7 @@ function ChapterGenerator({
           <RefreshCw size={16} />
           清空本章输入
         </button>
-        <span>本章输入和锁定策略会自动保存在浏览器，离开后回来也能继续。</span>
+        <span>先生成约束草稿，再决定是否正式生成正文。</span>
       </div>
       <label>
         章节标题
@@ -4467,7 +2567,7 @@ function ChapterGenerator({
       </label>
       <label>
         本章目标
-        <textarea value={form.goal} onChange={(event) => setForm({ ...form, goal: event.target.value })} rows={compact ? 3 : 4} placeholder="角色要达成什么、剧情要推进什么。" />
+        <textarea value={form.goal} onChange={(event) => setForm({ ...form, goal: event.target.value })} rows={compact ? 3 : 4} placeholder="这一章必须推进什么、达成什么转折？" />
       </label>
       <label className="generator-conflict-field">
         核心冲突
@@ -4475,12 +2575,12 @@ function ChapterGenerator({
           value={form.conflict}
           onChange={(event) => setForm({ ...form, conflict: event.target.value })}
           rows={compact ? 6 : 4}
-          placeholder=""
+          placeholder="这一章最主要的对抗、误解或拉扯是什么？"
         />
       </label>
       <div className="form-row">
         <label>
-          绔犺妭璇皵
+          章节语气
           <ToneComposer value={form.tone} onChange={(tone) => setForm({ ...form, tone })} placeholder="" />
         </label>
         <label>
@@ -4504,11 +2604,86 @@ function ChapterGenerator({
       <ConstraintPolicyComposer
         value={form.constraintPolicy}
         onChange={(constraintPolicy) => setForm((current) => ({ ...current, constraintPolicy }))}
+        normalizeConstraintPolicyDraft={normalizeConstraintPolicyDraft}
+        buildConstraintPolicyLabels={buildConstraintPolicyLabels}
+        constraintPolicyOptions={constraintPolicyOptions}
       />
+      <section className="constraint-policy-panel">
+        <div className="constraint-policy-header">
+          <div>
+            <h3>MCP 辅助</h3>
+            <p>需要时可调用 MCP tools，为 contract / planner / writer 补充额外上下文。</p>
+          </div>
+          <div className="constraint-policy-meta">
+            <span>{readyMcpServers.length} 个 ready server</span>
+          </div>
+        </div>
+        <label className="inline-check">
+          <input
+            type="checkbox"
+            checked={form.useMcp && readyMcpServers.length > 0}
+            disabled={!readyMcpServers.length}
+            onChange={(event) =>
+              setForm((current) => ({
+                ...current,
+                useMcp: event.target.checked,
+                selectedMcpServerIds: event.target.checked
+                  ? current.selectedMcpServerIds?.length
+                    ? current.selectedMcpServerIds
+                    : readyMcpServers.map((item) => item.id)
+                  : current.selectedMcpServerIds || []
+              }))
+            }
+          />
+          用 MCP 补充设定检索、资料查询或结构化上下文
+        </label>
+        <small className="ai-config-hint">
+          {readyMcpServers.length
+            ? "当前 AI provider 支持 tool calling，可以把可用 MCP server 接入本章工作流。"
+            : "当前没有 ready 的 MCP server，可先去 Tools/MCP 页配置。"}
+        </small>
+        <label className="inline-check">
+          <input
+            type="checkbox"
+            checked={form.useSubagents === true}
+            onChange={(event) =>
+              setForm((current) => ({
+                ...current,
+                useSubagents: event.target.checked
+              }))
+            }
+          />
+          使用多代理协作：Context Scout / Beat Architect / Continuity Reviewer
+        </label>
+        <small className="ai-config-hint">
+          多代理会先补全上下文，再把结论汇入 contract / plan，适合复杂章节。
+        </small>
+        {form.useMcp && readyMcpServers.length ? (
+          <div className="workflow-pill-list">
+            {readyMcpServers.map((server) => (
+              <label className="workflow-pill inline-check" key={`chapter-mcp-${server.id}`}>
+                <input
+                  type="checkbox"
+                  checked={(form.selectedMcpServerIds || []).includes(server.id)}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      selectedMcpServerIds: event.target.checked
+                        ? Array.from(new Set([...(current.selectedMcpServerIds || []), server.id]))
+                        : (current.selectedMcpServerIds || []).filter((item) => item !== server.id)
+                    }))
+                  }
+                />
+                {server.name}
+              </label>
+            ))}
+          </div>
+        ) : null}
+      </section>
       <div className="workflow-panel">
         <div className="panel-title compact">
           <div>
-            <h2>约束工作流</h2>
+            <h2>工作流草稿</h2>
           </div>
           <div className="panel-title-actions">
             <div className="list-toolbar segmented workflow-mode-toggle">
@@ -4517,19 +2692,19 @@ function ChapterGenerator({
                 type="button"
                 onClick={() => setWorkflowEditorMode("simple")}
               >
-                简洁模式
+                简版
               </button>
               <button
                 className={workflowEditorMode === "expert" ? "active" : ""}
                 type="button"
                 onClick={() => setWorkflowEditorMode("expert")}
               >
-                专家模式
+                专家版
               </button>
             </div>
             <button className="secondary-button" disabled={Boolean(working) || previewBusy} onClick={() => previewWorkflow().catch(() => {})} type="button">
               <BrainCircuit size={16} />
-              {previewBusy ? "生成中..." : "生成约束草案"}
+              {previewBusy ? "生成中..." : "生成约束草稿"}
             </button>
             <button className="secondary-button" disabled={!workflowPreview?.preflightGuard} onClick={applyGuardSuggestions} type="button">
               <Sparkles size={16} />
@@ -4549,13 +2724,13 @@ function ChapterGenerator({
               type="button"
             >
               <Trash2 size={16} />
-              清空工作流
+              重置工作流
             </button>
           </div>
         </div>
         {previewStale && (
           <div className="danger-card">
-            <p>表单已经变化，当前约束草案已过期。再次点击“生成约束草案”会刷新 contract / planner / guard。</p>
+            <p>当前输入已变化，请重新生成约束草稿，避免 contract / planner / guard 继续使用旧配置。</p>
           </div>
         )}
         {previewError && (
@@ -4567,6 +2742,11 @@ function ChapterGenerator({
           runtime={runtimeState}
           canCancel={runtimeState.active && Boolean(runtimeAbortRef.current)}
           onCancel={cancelCurrentRun}
+          getWorkflowRuntimeProgress={getWorkflowRuntimeProgress}
+          formatElapsedDuration={formatElapsedDuration}
+          formatRuntimeStatus={formatRuntimeStatus}
+          buildRuntimeStageSummary={buildRuntimeStageSummary}
+          summarizeInlineText={summarizeInlineText}
         />
         <ChapterWorkflowEditor
           preview={workflowPreview}
@@ -4581,620 +2761,78 @@ function ChapterGenerator({
           onRestoreFinding={restoreGuardFinding}
         />
       </div>
+      <ResearchTracePanel
+        title="最近 MCP 记录"
+        log={latestWorkflowResearchLog}
+        emptyText="本轮工作流还没有 MCP 调用记录"
+        describeTrace={describeWorkflowTrace}
+      />
+      <AgentTracePanel
+        title="最近 Agent 记录"
+        log={latestWorkflowSubagentLog}
+        emptyText="本轮工作流还没有 agent 协作记录"
+        describeTrace={describeWorkflowTrace}
+      />
+      <WorkflowTracePanel
+        logs={workflowTraceLogs}
+        workflowStageLabels={workflowStageLabels}
+        formatTime={formatTime}
+        describeWorkflowTrace={describeWorkflowTrace}
+      />
+      <div className="editor-footer">
+        <span>
+          {isRegenerateMode && selectedChapter
+            ? `当前目标：重生成第 ${selectedChapter.number} 章`
+            : `当前目标：生成第 ${nextChapterNumber} 章`}
+        </span>
+        <span>{isRegenerateMode ? "结果将覆盖当前章节审阅稿" : "结果会先进入审阅稿再决定是否入库"}</span>
+        <span>
+          {pendingReviewSession
+            ? "已生成审阅稿，可以继续修改、确认入库或直接丢弃"
+            : workflowPreview
+              ? "约束草稿已就绪，可以继续检查 contract / plan"
+              : "尚未生成草稿，系统会先跑约束与预检工作流"}
+        </span>
+      </div>
+      <label className="inline-check">
+        <input type="checkbox" checked={autoCheck} onChange={(event) => setAutoCheck(event.target.checked)} />
+        {isRegenerateMode ? "完成后自动检查当前章节" : "完成后自动检查新章节"}
+      </label>
+      <button className="primary-button" disabled={Boolean(working) || previewStale} type="submit">
+        <Sparkles size={17} />
+        {previewStale
+          ? "请先刷新草稿"
+          : isRegenerateMode
+            ? "开始重生成"
+            : "开始生成章节"}
+      </button>
+      </form>
       {pendingReviewSession && activeReviewWorkflow && (
-        <GenerationReviewPanel
+        <ChapterGenerationReviewPanel
           session={pendingReviewSession}
           workflow={activeReviewWorkflow}
           reviewSource={reviewSource}
           reviewContent={reviewContent}
           reviewDirty={workflowState.reviewDirty}
           busy={Boolean(working)}
+          loadedSourceContent={resolveReviewSourceContent(activeReviewWorkflow, reviewSource)}
+          repairPlanBlock={
+            activeReviewWorkflow?.repair?.repairPlan?.length ? (
+              <WorkflowSummaryBlock
+                title="Repair 动作"
+                items={activeReviewWorkflow.repair.repairPlan}
+                empty="本次无需额外修订动作。"
+                normalizeEditorList={normalizeEditorList}
+              />
+            ) : null
+          }
           onLoadSource={loadReviewSource}
           onChangeContent={updateReviewContent}
           onCommit={() => commitReview().catch(() => {})}
           onDiscard={() => discardReview().catch(() => {})}
         />
       )}
-      <WorkflowTracePanel logs={workflowTraceLogs} />
-      <div className="editor-footer">
-        <span>
-          {isRegenerateMode && selectedChapter
-            ? `当前会重生成第 ${selectedChapter.number} 章，并覆盖这一章`
-            : `当前会生成第 ${nextChapterNumber} 章，章号由系统锁定`}
-        </span>
-        <span>{isRegenerateMode ? "入库时会自动备份当前章节" : "确认入库后会追加到目录末尾"}</span>
-        <span>
-          {pendingReviewSession
-            ? "当前已有待入库审阅稿，可继续审阅、微调或丢弃。"
-            : workflowPreview
-              ? "当前会优先使用你手工调整后的 contract / plan。"
-              : "可先生成约束草案，再人工干预后生成审阅稿。"}
-        </span>
-      </div>
-      <label className="inline-check">
-        <input type="checkbox" checked={autoCheck} onChange={(event) => setAutoCheck(event.target.checked)} />
-        {isRegenerateMode ? "入库后自动检查当前章节" : "入库后自动运行一致性检查"}
-      </label>
-      <button className="primary-button" disabled={Boolean(working) || previewStale} type="submit">
-        <Sparkles size={17} />
-        {previewStale
-          ? "先刷新约束草案"
-          : isRegenerateMode
-            ? "生成重生成审阅稿"
-            : "生成章节审阅稿"}
-      </button>
-    </form>
-  );
-}
-
-function ChapterTaskFlow({ preview, workflow, reviewSession, runtime }) {
-  const items = runtime?.stages?.length
-    ? [
-        { label: "目标", state: "done" },
-        { label: "约束", state: aggregateRuntimeStepState(runtime, ["contract", "planner"]) },
-        { label: "风险", state: aggregateRuntimeStepState(runtime, ["guard_preflight"]) },
-        {
-          label: "生成",
-          state: runtime.mode === "preview" ? "idle" : aggregateRuntimeStepState(runtime, ["writer"])
-        },
-        {
-          label: "修正",
-          state: runtime.mode === "preview" ? "idle" : aggregateRuntimeStepState(runtime, ["guard", "repair"])
-        },
-        {
-          label: "入库",
-          state: runtime.mode === "preview" ? "idle" : aggregateRuntimeStepState(runtime, ["review_session"])
-        }
-      ]
-    : [
-        { label: "目标", state: "done" },
-        { label: "约束", state: preview || workflow ? "done" : "active" },
-        { label: "风险", state: preview?.preflightGuard || workflow?.preflightGuard ? "done" : "idle" },
-        { label: "生成", state: workflow ? "done" : "idle" },
-        {
-          label: "修正",
-          state: workflow?.repair?.applied ? (reviewSession ? "active" : "done") : workflow ? "done" : "idle"
-        },
-        { label: "入库", state: reviewSession ? "active" : workflow && !workflow.pendingReview ? "done" : "idle" }
-      ];
-
-  return (
-    <div className="task-flow">
-      {items.map((item) => (
-        <div key={item.label} className={`task-flow-step ${item.state}`}>
-          <small>{item.label}</small>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function LegacyWorkflowRuntimePanel({ runtime, canCancel = false, onCancel }) {
-  const [tick, setTick] = useState(() => Date.now());
-  const progress = getWorkflowRuntimeProgress(runtime);
-  const currentStage =
-    runtime?.stages?.find((item) => item.key === runtime.currentStageKey) ||
-    runtime?.stages?.find((item) => item.status === "running") ||
-    runtime?.stages?.[runtime?.stages?.length - 1] ||
-    null;
-
-  useEffect(() => {
-    if (!runtime?.active) return undefined;
-    const timer = window.setInterval(() => setTick(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [runtime?.active]);
-
-  if (!runtime?.stages?.length) return null;
-
-  const elapsed = formatElapsedDuration(
-    runtime.startedAt,
-    runtime.active ? new Date(tick).toISOString() : runtime.finishedAt
-  );
-  const panelTone = runtime.error ? "error" : runtime.cancelled ? "cancelled" : runtime.active ? "active" : "done";
-
-  return (
-    <article className={`workflow-runtime-panel ${panelTone}`}>
-      <header>
-        <div>
-          <strong>{runtime.active ? `正在执行 ${currentStage?.label || "Workflow"}` : "最近一轮执行"}</strong>
-          <p>{runtime.currentMessage || (runtime.active ? "阶段状态会实时刷新。" : "本轮运行已经结束。")}</p>
-        </div>
-        <div className="workflow-runtime-stats">
-          <span>
-            <Gauge size={14} />
-            {progress.completed}/{progress.total}
-          </span>
-          <span>
-            <Clock3 size={14} />
-            {elapsed}
-          </span>
-          {canCancel ? (
-            <button className="secondary-button workflow-runtime-cancel" type="button" onClick={onCancel}>
-              取消本次运行
-            </button>
-          ) : null}
-        </div>
-      </header>
-      <div className="workflow-runtime-progress">
-        <span style={{ width: `${progress.percent}%` }} />
-      </div>
-      <div className="workflow-runtime-stage-list">
-        {runtime.stages.map((stage) => (
-          <article className={`workflow-runtime-stage ${stage.status || "idle"}`} key={stage.key}>
-            <div className="workflow-runtime-stage-head">
-              <strong>{stage.label}</strong>
-              <small>{formatRuntimeStatus(stage.status)}</small>
-            </div>
-            <p>{stage.message || "等待执行。"}</p>
-          </article>
-        ))}
-      </div>
-      {runtime.writerStream ? (
-        <div className="workflow-runtime-writer">
-          <div className="workflow-runtime-stage-head">
-            <strong>Writer 实时输出</strong>
-            <small>{runtime.writerUnits} 字</small>
-          </div>
-          <p>{summarizeInlineText(runtime.writerStream, 220)}</p>
-        </div>
-      ) : null}
-      {runtime.error ? <p className="workflow-runtime-error">{runtime.error}</p> : null}
-    </article>
-  );
-}
-
-function WorkflowRuntimePanel({ runtime, canCancel = false, onCancel }) {
-  const [tick, setTick] = useState(() => Date.now());
-  const progress = getWorkflowRuntimeProgress(runtime);
-  const currentStage =
-    runtime?.stages?.find((item) => item.key === runtime.currentStageKey) ||
-    runtime?.stages?.find((item) => item.status === "running") ||
-    runtime?.stages?.[runtime?.stages?.length - 1] ||
-    null;
-
-  useEffect(() => {
-    if (!runtime?.active) return undefined;
-    const timer = window.setInterval(() => setTick(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [runtime?.active]);
-
-  if (!runtime?.stages?.length) return null;
-
-  const elapsed = formatElapsedDuration(
-    runtime.startedAt,
-    runtime.active ? new Date(tick).toISOString() : runtime.finishedAt
-  );
-  const panelTone = runtime.error ? "error" : runtime.cancelled ? "cancelled" : runtime.active ? "active" : "done";
-  const headerTitle = runtime.active
-    ? `正在执行 ${currentStage?.label || "Workflow"}`
-    : runtime.cancelled
-      ? "本次运行已取消"
-      : "最近一轮执行";
-  const headerDetail = runtime.currentMessage || (runtime.active ? "阶段状态会实时刷新。" : "本轮运行已经结束。");
-
-  return (
-    <article className={`workflow-runtime-panel ${panelTone}`}>
-      <header>
-        <div>
-          <strong>{headerTitle}</strong>
-          <p>{headerDetail}</p>
-        </div>
-        <div className="workflow-runtime-stats">
-          <span>
-            <Gauge size={14} />
-            {progress.completed}/{progress.total}
-          </span>
-          <span>
-            <Clock3 size={14} />
-            {elapsed}
-          </span>
-          {canCancel ? (
-            <button className="secondary-button workflow-runtime-cancel" type="button" onClick={onCancel}>
-              取消本次运行
-            </button>
-          ) : null}
-        </div>
-      </header>
-      <div className="workflow-runtime-progress">
-        <span style={{ width: `${progress.percent}%` }} />
-      </div>
-      <div className="workflow-runtime-stage-list">
-        {runtime.stages.map((stage) => (
-          <article className={`workflow-runtime-stage ${stage.status || "idle"}`} key={stage.key}>
-            <div className="workflow-runtime-stage-head">
-              <strong>{stage.label}</strong>
-              <small>{formatRuntimeStatus(stage.status)}</small>
-            </div>
-            <p>{buildRuntimeStageSummary(stage)}</p>
-          </article>
-        ))}
-      </div>
-      {runtime.writerStream ? (
-        <div className="workflow-runtime-writer">
-          <div className="workflow-runtime-stage-head">
-            <strong>Writer 实时输出</strong>
-            <small>{runtime.writerUnits} 字</small>
-          </div>
-          <p>{summarizeInlineText(runtime.writerStream, 220)}</p>
-        </div>
-      ) : null}
-      {runtime.error ? <p className="workflow-runtime-error">{runtime.error}</p> : null}
-    </article>
-  );
-}
-
-function WorkflowSummaryBlock({ title, items, empty = "暂无" }) {
-  const normalized = normalizeEditorList(items || []);
-  return (
-    <div className="workflow-summary-block">
-      <small>{title}</small>
-      {normalized.length ? (
-        <div className="workflow-pill-list">
-          {normalized.map((item, index) => (
-            <span className="workflow-pill" key={`${title}-${index}-${item}`}>
-              {item}
-            </span>
-          ))}
-        </div>
-      ) : (
-        <p className="workflow-empty">{empty}</p>
-      )}
-    </div>
-  );
-}
-
-function WorkflowActionBanner({ recommendation }) {
-  if (!recommendation) return null;
-
-  const iconMap = {
-    idle: BrainCircuit,
-    ready: CheckCircle2,
-    warn: AlertTriangle,
-    review: Edit3,
-    done: Sparkles
-  };
-  const Icon = iconMap[recommendation.tone] || BrainCircuit;
-
-  return (
-    <div className={`workflow-action-banner ${recommendation.tone || "idle"}`}>
-      <div className="workflow-action-icon">
-        <Icon size={18} />
-      </div>
-      <div className="workflow-action-copy">
-        <strong>{recommendation.title}</strong>
-        <p>{recommendation.detail}</p>
-      </div>
-    </div>
-  );
-}
-
-function ConstraintPolicyComposer({ value, onChange }) {
-  const normalized = normalizeConstraintPolicyDraft(value);
-  const enabledLabels = buildConstraintPolicyLabels(normalized);
-
-  function togglePolicy(policyId) {
-    onChange({
-      ...normalized,
-      [policyId]: !normalized[policyId]
-    });
-  }
-
-  return (
-    <section className="constraint-policy-panel">
-      <div className="constraint-policy-header">
-        <div>
-          <h3>约束锁定策略</h3>
-          <p>这些开关会决定 contract / planner / guard 强制检查哪些层面。</p>
-        </div>
-        <div className="constraint-policy-meta">
-          <span>{enabledLabels.length} / {constraintPolicyOptions.length} 项启用</span>
-          {enabledLabels.length ? (
-            <div className="workflow-pill-list">
-              {enabledLabels.map((label) => (
-                <span className="workflow-pill" key={label}>
-                  {label}
-                </span>
-              ))}
-            </div>
-          ) : (
-            <span>当前没有额外锁定策略。</span>
-          )}
-        </div>
-      </div>
-      <div className="constraint-policy-grid">
-        {constraintPolicyOptions.map((option) => {
-          const active = normalized[option.id];
-          return (
-            <button
-              className={`constraint-policy-card ${active ? "active" : ""}`}
-              key={option.id}
-              type="button"
-              onClick={() => togglePolicy(option.id)}
-            >
-              <div className="constraint-policy-card-head">
-                <strong>{option.label}</strong>
-                <span className={`constraint-policy-state ${active ? "active" : "inactive"}`}>
-                  {active ? "已锁定" : "未锁定"}
-                </span>
-              </div>
-              <p>{option.description}</p>
-            </button>
-          );
-        })}
-      </div>
-    </section>
-  );
-}
-
-function WorkflowTracePanel({ logs = [] }) {
-  return (
-    <article className="panel workflow-trace-panel">
-      <div className="panel-title compact">
-        <div>
-          <h2>阶段轨迹</h2>
-          <span>最近 8 条生成链路记录，便于回看 Planner / Guard / Repair 的执行状态。</span>
-        </div>
-      </div>
-      {logs.length ? (
-        <div className="workflow-trace-list">
-          {logs.map((log) => (
-            <article className={`workflow-trace-item ${log.status || "success"}`} key={log.id}>
-              <div className="workflow-trace-head">
-                <strong>{workflowStageLabels[log.stage] || log.stage || "未知阶段"}</strong>
-                <small>{formatTime(log.createdAt)}</small>
-              </div>
-              <div className="workflow-meta">
-                <span>状态：{log.status === "error" ? "失败" : "完成"}</span>
-                <span>链路：{log.workflow || "workflow"}</span>
-                {log.chapterId ? <span>章节：{log.chapterId}</span> : null}
-              </div>
-              <p>{describeWorkflowTrace(log)}</p>
-            </article>
-          ))}
-        </div>
-      ) : (
-        <p className="workflow-empty">当前还没有生成链路记录。跑一次约束草案或章节生成后，这里会显示阶段轨迹。</p>
-      )}
-    </article>
-  );
-}
-
-function ConstraintLayersPanel({ layers }) {
-  const layerDefinitions = [
-    {
-      key: "chapterIdentity",
-      title: "章节身份层",
-      description: "锁章号、标题和本章身份，防止写串章或标题漂移。",
-      empty: "当前没有额外章节身份锁。"
-    },
-    {
-      key: "characterMotivations",
-      title: "人物动机层",
-      description: "明确本章必须保持的角色诉求与行为方向。",
-      empty: "当前未锁定人物动机。"
-    },
-    {
-      key: "worldRules",
-      title: "世界规则层",
-      description: "把能力限制、世界禁忌和硬规则压进本章。",
-      empty: "当前未额外锁定世界规则。"
-    },
-    {
-      key: "continuityAnchors",
-      title: "连续性层",
-      description: "强制承接最近章节的事实、情绪与关系变化。",
-      empty: "当前没有最近章节连续性锚点。"
-    },
-    {
-      key: "foreshadowAnchors",
-      title: "伏笔层",
-      description: "提醒 Writer / Guard 衔接未回收伏笔，减少漏接。",
-      empty: "当前没有待照应伏笔。"
-    },
-    {
-      key: "hardBans",
-      title: "硬禁止层",
-      description: "集中列出本章绝不能发生的越界、漂移和冲突。",
-      empty: "当前没有额外硬禁止项。"
-    }
-  ];
-  const policyLabels = buildConstraintPolicyLabels(layers?.policy);
-
-  return (
-    <article className="workflow-stage-card constraint-layers-card">
-      <header>
-        <span>Constraint Layers</span>
-        <strong>{policyLabels.length ? `${policyLabels.length} 项策略开启` : "默认策略"}</strong>
-      </header>
-      <div className="constraint-policy-meta">
-        {policyLabels.length ? (
-          <div className="workflow-pill-list">
-            {policyLabels.map((label) => (
-              <span className="workflow-pill" key={label}>
-                {label}
-              </span>
-            ))}
-          </div>
-        ) : (
-          <span>当前未读到额外策略开关，按默认约束处理。</span>
-        )}
-      </div>
-      <div className="constraint-layers-list">
-        {layerDefinitions.map((definition) => {
-          const items = normalizeEditorList(layers?.[definition.key] || []);
-          return (
-            <section className={`constraint-layer-block ${items.length ? "active" : "idle"}`} key={definition.key}>
-              <div className="constraint-layer-head">
-                <strong>{definition.title}</strong>
-                <small>{items.length ? `${items.length} 条` : "未锁定"}</small>
-              </div>
-              <p>{definition.description}</p>
-              {items.length ? (
-                <div className="constraint-layer-items">
-                  {items.map((item, index) => (
-                    <span className="workflow-pill" key={`${definition.key}-${index}-${item}`}>
-                      {item}
-                    </span>
-                  ))}
-                </div>
-              ) : (
-                <p className="workflow-empty">{definition.empty}</p>
-              )}
-            </section>
-          );
-        })}
-      </div>
-    </article>
-  );
-}
-
-function RevisionDiffCard({ title, beforeLabel, afterLabel, beforeText, afterText, emptyText }) {
-  const summary = buildRevisionDiffSummary(beforeText, afterText);
-  const hasDiff = summary.changedBlocks > 0 || summary.deltaUnits !== 0;
-  const deltaLabel = summary.deltaUnits > 0 ? `+${summary.deltaUnits}` : `${summary.deltaUnits}`;
-
-  return (
-    <article className={`review-diff-card ${hasDiff ? "changed" : "stable"}`}>
-      <header>
-        <strong>{title}</strong>
-        <small>{hasDiff ? "检测到差异" : "无明显差异"}</small>
-      </header>
-      <div className="review-diff-meta">
-        <span>{beforeLabel}：{summary.beforeUnits} 字</span>
-        <span>{afterLabel}：{summary.afterUnits} 字</span>
-        <span>变化段落：{summary.changedBlocks}</span>
-        <span>字数变化：{deltaLabel}</span>
-      </div>
-      {hasDiff && summary.firstChangedBlock ? (
-        <div className="review-diff-preview">
-          <div>
-            <small>{beforeLabel} · 第 {summary.firstChangedBlock.index} 段</small>
-            <p>{summary.firstChangedBlock.before}</p>
-          </div>
-          <div>
-            <small>{afterLabel} · 第 {summary.firstChangedBlock.index} 段</small>
-            <p>{summary.firstChangedBlock.after}</p>
-          </div>
-        </div>
-      ) : (
-        <p className="workflow-empty">{emptyText}</p>
-      )}
-    </article>
-  );
-}
-
-function GenerationReviewPanel({
-  session,
-  workflow,
-  reviewSource,
-  reviewContent,
-  reviewDirty,
-  busy,
-  onLoadSource,
-  onChangeContent,
-  onCommit,
-  onDiscard
-}) {
-  const commitLabel = session?.sessionType === "regenerate" ? "确认覆盖当前章节" : "确认存入新章节";
-  const writerContent = workflow?.repair?.originalContent || "";
-  const repairContent =
-    workflow?.repair?.repairedContent || workflow?.repair?.reviewContent || workflow?.repair?.originalContent || "";
-  const loadedSourceContent = resolveReviewSourceContent(workflow, reviewSource);
-  const writerLength = countTextUnits(writerContent);
-  const repairLength = countTextUnits(repairContent);
-
-  return (
-    <article className="panel generation-review-panel">
-      <div className="panel-title compact">
-        <div>
-          <h2>审阅后入库</h2>
-          <span>
-            第 {workflow?.chapterNumber || "--"} 章 · {session?.sessionType === "regenerate" ? "重生成覆写" : "新章入库"}
-          </span>
-        </div>
-      </div>
-      <div className="workflow-meta">
-        <span>Post Guard：{workflow?.postGuard?.status || "pass"}</span>
-        <span>Repair：{workflow?.repair?.applied ? "已给出最小修订稿" : "未触发"}</span>
-        <span>当前载入：{reviewSource === "writer" ? "Writer 原稿" : "Repair 修订稿"}</span>
-      </div>
-      <div className="review-source-row">
-        <button
-          className={`secondary-button ${reviewSource === "writer" ? "active" : ""}`}
-          disabled={busy}
-          type="button"
-          onClick={() => onLoadSource("writer")}
-        >
-          载入 Writer 原稿 · {writerLength} 字
-        </button>
-        <button
-          className={`secondary-button ${reviewSource === "repair" ? "active" : ""}`}
-          disabled={busy || !workflow?.repair?.applied}
-          type="button"
-          onClick={() => onLoadSource("repair")}
-        >
-          载入 Repair 修订稿 · {repairLength} 字
-        </button>
-      </div>
-      {workflow?.repair?.repairPlan?.length ? (
-        <WorkflowSummaryBlock title="Repair 动作" items={workflow.repair.repairPlan} empty="本次无需额外修订动作。" />
-      ) : null}
-      <div className="review-diff-grid">
-        {workflow?.repair?.applied ? (
-          <RevisionDiffCard
-            title="Writer -> Repair 差异"
-            beforeLabel="Writer"
-            afterLabel="Repair"
-            beforeText={writerContent}
-            afterText={repairContent}
-            emptyText="Repair 没有改动正文，当前修订稿与 Writer 原稿一致。"
-          />
-        ) : (
-          <RevisionDiffCard
-            title="Writer -> Repair 差异"
-            beforeLabel="Writer"
-            afterLabel="Repair"
-            beforeText={writerContent}
-            afterText={writerContent}
-            emptyText="这轮没有触发 Repair，Writer 原稿将直接进入审阅。"
-          />
-        )}
-        <RevisionDiffCard
-          title={reviewDirty ? "当前载入源 -> 你的手工修改" : "当前载入源 -> 最终入库稿"}
-          beforeLabel={reviewSource === "writer" ? "Writer" : "Repair"}
-          afterLabel="当前文本"
-          beforeText={loadedSourceContent}
-          afterText={reviewContent}
-          emptyText={
-            reviewDirty
-              ? "你手工修改后的差异很小，当前文本和载入源几乎一致。"
-              : "你还没有手工改动正文，确认入库会直接采用当前载入版本。"
-          }
-        />
-      </div>
-      <label>
-        最终入库正文
-        <textarea
-          className="review-textarea"
-          rows={18}
-          value={reviewContent}
-          onChange={(event) => onChangeContent(event.target.value)}
-        />
-      </label>
-      <div className="editor-footer">
-        <span>{reviewDirty ? "你已经手工改过审阅稿，入库时会以当前文本为准。" : "可直接采用当前版本入库，也可以先微调正文。"}</span>
-      </div>
-      <div className="card-actions">
-        <button className="primary-button" disabled={busy || !reviewContent.trim()} type="button" onClick={onCommit}>
-          <Save size={16} />
-          {commitLabel}
-        </button>
-        <button className="secondary-button" disabled={busy} type="button" onClick={onDiscard}>
-          <Trash2 size={16} />
-          丢弃这次审阅稿
-        </button>
-      </div>
-    </article>
+    </>
   );
 }
 
@@ -5240,7 +2878,7 @@ function ChapterWorkflowEditor({
             {expertMode ? (
               <>
                 <label>
-                  本章任务
+                  核心使命
                   <textarea rows={2} value={previewData.contract?.coreMission || ""} onChange={(event) => onUpdateContract("coreMission", event.target.value)} />
                 </label>
                 <label>
@@ -5248,43 +2886,43 @@ function ChapterWorkflowEditor({
                   <textarea rows={2} value={previewData.contract?.conflictAnchor || ""} onChange={(event) => onUpdateContract("conflictAnchor", event.target.value)} />
                 </label>
                 <label>
-                  收束要求
+                  结尾要求
                   <textarea rows={2} value={previewData.contract?.endingRequirement || ""} onChange={(event) => onUpdateContract("endingRequirement", event.target.value)} />
                 </label>
                 <label>
-                  必须调用设定
+                  必用设定
                   <textarea rows={4} value={joinEditorList(previewData.contract?.mustUseSettings || [])} onChange={(event) => onUpdateContract("mustUseSettings", event.target.value, true)} />
                 </label>
                 <label>
-                  必须照应
+                  必提信息
                   <textarea rows={4} value={joinEditorList(previewData.contract?.mustMention || [])} onChange={(event) => onUpdateContract("mustMention", event.target.value, true)} />
                 </label>
                 <label>
-                  连续性约束
+                  连续性
                   <textarea rows={5} value={joinEditorList(previewData.contract?.continuity || [])} onChange={(event) => onUpdateContract("continuity", event.target.value, true)} />
                 </label>
                 <label>
-                  禁止漂移
+                  禁止项
                   <textarea rows={5} value={joinEditorList(previewData.contract?.forbidden || [])} onChange={(event) => onUpdateContract("forbidden", event.target.value, true)} />
                 </label>
               </>
             ) : (
               <>
-                <p className="workflow-summary-lead">{previewData.contract?.coreMission || "本章任务待明确。"}</p>
+                <p className="workflow-summary-lead">{previewData.contract?.coreMission || "尚未填写本章核心使命。"}</p>
                 <div className="workflow-summary-grid">
                   <div>
                     <small>冲突锚点</small>
-                    <p>{previewData.contract?.conflictAnchor || "未指定"}</p>
+                    <p>{previewData.contract?.conflictAnchor || "待补充"}</p>
                   </div>
                   <div>
-                    <small>收束要求</small>
-                    <p>{previewData.contract?.endingRequirement || "允许自然收束"}</p>
+                    <small>结尾要求</small>
+                    <p>{previewData.contract?.endingRequirement || "待补充"}</p>
                   </div>
                 </div>
-                <WorkflowSummaryBlock title="必须调用设定" items={previewData.contract?.mustUseSettings || []} empty="未额外锁定，默认使用已选设定。" />
-                <WorkflowSummaryBlock title="必须照应" items={previewData.contract?.mustMention || []} empty="暂无额外照应项。" />
-                <WorkflowSummaryBlock title="连续性约束" items={previewData.contract?.continuity || []} empty="当前没有额外连续性提醒。" />
-                <WorkflowSummaryBlock title="禁止漂移" items={previewData.contract?.forbidden || []} empty="当前没有额外禁止项。" />
+                <WorkflowSummaryBlock title="必用设定" items={previewData.contract?.mustUseSettings || []} empty="当前没有强制设定。" normalizeEditorList={normalizeEditorList} />
+                <WorkflowSummaryBlock title="必提信息" items={previewData.contract?.mustMention || []} empty="当前没有强制信息。" normalizeEditorList={normalizeEditorList} />
+                <WorkflowSummaryBlock title="连续性" items={previewData.contract?.continuity || []} empty="当前没有连续性约束。" normalizeEditorList={normalizeEditorList} />
+                <WorkflowSummaryBlock title="禁止项" items={previewData.contract?.forbidden || []} empty="当前没有禁止项。" normalizeEditorList={normalizeEditorList} />
               </>
             )}
           </article>
@@ -5334,8 +2972,8 @@ function ChapterWorkflowEditor({
                     <p>{previewData.plan?.endingMode || "natural"}</p>
                   </div>
                 </div>
-                <WorkflowSummaryBlock title="执行节拍" items={previewData.plan?.beats || []} empty="当前还没有拆出具体节拍。" />
-                <WorkflowSummaryBlock title="必须保留" items={previewData.plan?.mustKeep || []} empty="没有额外必须保留项。" />
+                <WorkflowSummaryBlock title="执行节拍" items={previewData.plan?.beats || []} empty="Planner 还没有拆出节拍。" normalizeEditorList={normalizeEditorList} />
+                <WorkflowSummaryBlock title="必须保留" items={previewData.plan?.mustKeep || []} empty="当前没有额外保留项。" normalizeEditorList={normalizeEditorList} />
               </>
             )}
           </article>
@@ -5348,8 +2986,8 @@ function ChapterWorkflowEditor({
             <p className="workflow-summary-lead">{buildGuardSummaryLine(previewData.preflightGuard, "Preflight")}</p>
             <div className="workflow-meta">
               <span>状态：{previewData.preflightGuard?.status || "pass"}</span>
-              <span>问题：{preflightFindings.length}</span>
-              <span>忽略：{preflightFindings.length - visiblePreflightFindings.length}</span>
+              <span>问题数：{preflightFindings.length}</span>
+              <span>已忽略：{preflightFindings.length - visiblePreflightFindings.length}</span>
             </div>
             {visiblePreflightFindings.length ? (
               <div className="workflow-findings">
@@ -5372,7 +3010,7 @@ function ChapterWorkflowEditor({
                         )}
                         {ignored ? (
                           <button className="secondary-button" type="button" onClick={() => onRestoreFinding(finding, index)}>
-                            恢复本章检查
+                            恢复
                           </button>
                         ) : (
                           <button className="secondary-button" type="button" onClick={() => onIgnoreFinding(finding, index)}>
@@ -5385,14 +3023,18 @@ function ChapterWorkflowEditor({
                 })}
               </div>
             ) : (
-              <p className="workflow-empty">预写作 guard 没有发现明显问题，可以直接进入 writer。</p>
+              <p className="workflow-empty">预检 Guard 没发现明显问题，可以继续进入 Writer。</p>
             )}
           </article>
-          <ConstraintLayersPanel layers={constraintLayers} />
+          <ConstraintLayersPanel
+            layers={constraintLayers}
+            buildConstraintPolicyLabels={buildConstraintPolicyLabels}
+            normalizeEditorList={normalizeEditorList}
+          />
         </>
       ) : (
         <div className="collapsed-hint">
-          先点击“生成约束草案”，系统会把 <code>contract -&gt; planner -&gt; preflight guard</code> 可视化出来，你可以先改约束，再正式生成正文。
+          先点击“生成约束草稿”，系统会把 <code>contract -&gt; planner -&gt; preflight guard</code> 可视化出来。你可以先改约束，再正式生成正文。
         </div>
       )}
 
@@ -5401,17 +3043,17 @@ function ChapterWorkflowEditor({
           <header>
             <span>Writer / Post Guard / Repair</span>
             <strong>
-              {lastRun.pendingReview ? "待入库审阅" : lastRun.repair?.applied ? "已修正" : "直接通过"}
+              {lastRun.pendingReview ? "待审阅" : lastRun.repair?.applied ? "已修订" : "已通过"}
             </strong>
           </header>
           <p className="workflow-summary-lead">{buildWorkflowOutcomeSummaryLine(lastRun)}</p>
           <div className="workflow-meta">
-            <span>Post Guard：{lastRun.postGuard?.status || "pass"}</span>
+            <span>Post Guard?{lastRun.postGuard?.status || "pass"}</span>
             <span>评分：{lastRun.postGuard?.score ?? "--"}</span>
-            <span>Repair：{lastRun.repair?.applied ? "已生成最小修订稿" : "未触发"}</span>
+            <span>Repair：{lastRun.repair?.applied ? "已应用修订" : "未触发"}</span>
           </div>
           {lastRun.repair?.repairPlan?.length ? (
-            <WorkflowSummaryBlock title="最小修订动作" items={lastRun.repair.repairPlan} empty="正文已直接通过，无需修订动作。" />
+            <WorkflowSummaryBlock title="修订计划" items={lastRun.repair.repairPlan} empty="当前没有修订计划。" normalizeEditorList={normalizeEditorList} />
           ) : null}
           {postFindings.length ? (
             <div className="workflow-findings">
@@ -5420,1134 +3062,15 @@ function ChapterWorkflowEditor({
                   <strong>{finding.title}</strong>
                   <small>{finding.type} / {finding.target}</small>
                   <p>{finding.detail}</p>
-                  <p>修订建议：{finding.suggestion}</p>
+                  <p>建议：{finding.suggestion}</p>
                 </article>
               ))}
             </div>
           ) : (
-            <p className="workflow-empty">正文在 guard 阶段直接通过，没有触发 repair。</p>
+             <p className="workflow-empty">Post Guard 没有提出需要 Repair 的问题。</p>
           )}
         </article>
       )}
-    </div>
-  );
-}
-
-function SettingExtractorPage({
-  project,
-  mutate,
-  working,
-  routeChapterId = "",
-  onBack,
-  onChangeChapter
-}) {
-  const extractorDraftKey = useMemo(
-    () => makeWebDraftKey(project.id, "setting-extractor"),
-    [project.id]
-  );
-  const [form, setForm] = useWebDraftState(
-    extractorDraftKey,
-    buildSettingExtractionDraft(project, routeChapterId)
-  );
-  const chapterIdsSignature = project.chapters.map((chapter) => chapter.id).join("|");
-  const activeChapter =
-    findChapterById(project, form.chapterId) ||
-    findChapterById(project, routeChapterId) ||
-    project.chapters[0] ||
-    null;
-  const sourceText =
-    form.sourceMode === "chapter" ? buildChapterSourceText(activeChapter) : form.manualSource;
-  const checkedCount = form.results.filter((item) => item.checked).length;
-
-  useEffect(() => {
-    const fallbackChapterId = routeChapterId || form.chapterId || project.chapters[0]?.id || "";
-    const normalizedChapterId = project.chapters.some((chapter) => chapter.id === fallbackChapterId)
-      ? fallbackChapterId
-      : project.chapters[0]?.id || "";
-    const nextSourceMode =
-      routeChapterId || (!project.chapters.length && form.sourceMode === "chapter")
-        ? project.chapters.length && routeChapterId
-          ? "chapter"
-          : "manual"
-        : form.sourceMode;
-
-    setForm((current) => {
-      if (
-        current.chapterId === normalizedChapterId &&
-        current.sourceMode === nextSourceMode
-      ) {
-        return current;
-      }
-
-      return {
-        ...current,
-        chapterId: normalizedChapterId,
-        sourceMode: nextSourceMode
-      };
-    });
-  }, [routeChapterId, project.chapters.length, chapterIdsSignature, project.id, form.chapterId, form.sourceMode, setForm]);
-
-  async function submit(event) {
-    event.preventDefault();
-    if (!sourceText.trim()) return;
-
-    const data = await mutate(
-      `/api/projects/${project.id}/settings/extract`,
-      {
-        sourceMode: form.sourceMode,
-        chapterId: form.sourceMode === "chapter" ? activeChapter?.id || "" : "",
-        source: form.sourceMode === "manual" ? form.manualSource : sourceText
-      },
-      "提取设定"
-    );
-
-    setForm((current) => ({
-      ...current,
-      results: (data.extractionResult || []).map((item, index) =>
-        buildExtractedSettingDraft(item, index)
-      )
-    }));
-  }
-
-  async function importSelected() {
-    const items = form.results
-      .filter((item) => item.checked)
-      .map(({ type, name, summary, traits, rules, evidence }) => ({
-        type,
-        name,
-        summary,
-        traits,
-        rules,
-        evidence
-      }));
-
-    if (!items.length) return;
-
-    await mutate(`/api/projects/${project.id}/settings/import`, { items }, "导入设定");
-    setForm((current) => ({
-      ...current,
-      results: current.results.filter((item) => !item.checked)
-    }));
-  }
-
-  function updateResult(tempId, patch) {
-    setForm((current) => ({
-      ...current,
-      results: current.results.map((item) =>
-        item.tempId === tempId ? { ...item, ...patch } : item
-      )
-    }));
-  }
-
-  function removeResult(tempId) {
-    setForm((current) => ({
-      ...current,
-      results: current.results.filter((item) => item.tempId !== tempId)
-    }));
-  }
-
-  function setSourceMode(sourceMode) {
-    if (sourceMode === "chapter" && activeChapter?.id) {
-      onChangeChapter?.(activeChapter.id);
-    }
-    if (sourceMode === "manual") {
-      onChangeChapter?.("");
-    }
-
-    setForm((current) => ({
-      ...current,
-      sourceMode,
-      chapterId: current.chapterId || project.chapters[0]?.id || ""
-    }));
-  }
-
-  function handleChapterChange(chapterId) {
-    setForm((current) => ({
-      ...current,
-      chapterId,
-      sourceMode: "chapter"
-    }));
-    onChangeChapter?.(chapterId);
-  }
-
-  return (
-    <section className="chapter-page">
-      <div className="panel chapter-page-header">
-        <div>
-          <p className="eyebrow">Setting Extractor</p>
-          <h2>设定提取页</h2>
-          <p className="chapter-page-note">
-            从已有章节或外部文本里提取值得入库的人物、世界观、地点、道具和能力体系，先编辑再导入。
-          </p>
-        </div>
-        <div className="chapter-page-toolbar">
-          <button className="secondary-button" type="button" onClick={onBack}>
-            返回设定库
-          </button>
-        </div>
-      </div>
-
-      <div className="chapter-page-grid setting-extractor-grid">
-        <div className="panel">
-          <div className="panel-title">
-            <div>
-              <p className="eyebrow">Source</p>
-              <h2>提取来源</h2>
-            </div>
-            <Sparkles size={20} />
-          </div>
-          <form className="editor-form" onSubmit={submit}>
-            <div className="list-toolbar segmented">
-              <button
-                className={form.sourceMode === "chapter" ? "active" : ""}
-                type="button"
-                disabled={!project.chapters.length}
-                onClick={() => setSourceMode("chapter")}
-              >
-                已有章节
-              </button>
-              <button
-                className={form.sourceMode === "manual" ? "active" : ""}
-                type="button"
-                onClick={() => setSourceMode("manual")}
-              >
-                粘贴文本
-              </button>
-            </div>
-
-            {form.sourceMode === "chapter" ? (
-              project.chapters.length ? (
-                <>
-                  <label>
-                    目标章节
-                    <select
-                      value={activeChapter?.id || ""}
-                      onChange={(event) => handleChapterChange(event.target.value)}
-                    >
-                      {project.chapters.map((chapter) => (
-                        <option key={chapter.id} value={chapter.id}>
-                          第 {chapter.number} 章 · {chapter.title}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    用于提取的文本
-                    <textarea
-                      className="chapter-editor-textarea extractor-source-textarea"
-                      value={sourceText}
-                      readOnly
-                    />
-                  </label>
-                </>
-              ) : (
-                <EmptyState text="还没有可提取的章节，请改用“粘贴文本”模式。" />
-              )
-            ) : (
-              <label>
-                待提取文本
-                <textarea
-                  className="chapter-editor-textarea extractor-source-textarea"
-                  value={form.manualSource}
-                  onChange={(event) =>
-                    setForm((current) => ({ ...current, manualSource: event.target.value }))
-                  }
-                  placeholder="可以粘贴外部文本，也可以把某一个片段整理后再提取。"
-                />
-              </label>
-            )}
-
-            <div className="editor-footer">
-              <span>当前字数：{sourceText.trim().length}</span>
-              <span>{form.results.length ? `本轮已提取 ${form.results.length} 条` : "还没有提取结果"}</span>
-            </div>
-
-            <button className="primary-button" type="submit" disabled={Boolean(working) || !sourceText.trim()}>
-              <Sparkles size={17} />
-              提取设定
-            </button>
-          </form>
-        </div>
-
-        <div className="panel result-panel">
-          <div className="panel-title">
-            <div>
-              <p className="eyebrow">Candidates</p>
-              <h2>待导入设定</h2>
-            </div>
-            <div className="panel-title-actions">
-              <span>{checkedCount} / {form.results.length}</span>
-              <button
-                className="secondary-button"
-                type="button"
-                disabled={!form.results.length}
-                onClick={() =>
-                  setForm((current) => ({
-                    ...current,
-                    results: current.results.map((item) => ({ ...item, checked: true }))
-                  }))
-                }
-              >
-                全选为导入
-              </button>
-              <button
-                className="secondary-button"
-                type="button"
-                disabled={!form.results.length}
-                onClick={() => setForm((current) => ({ ...current, results: [] }))}
-              >
-                清空结果
-              </button>
-            </div>
-          </div>
-
-          {form.results.length ? (
-            <div className="extract-result-list">
-              <div className="card-actions">
-                <button
-                  className="primary-button"
-                  type="button"
-                  disabled={Boolean(working) || !checkedCount}
-                  onClick={importSelected}
-                >
-                  <Plus size={16} />
-                  导入已选中设定
-                </button>
-              </div>
-
-              {form.results.map((item) => (
-                <article className="asset-card extracted-card" key={item.tempId}>
-                  <label className="inline-check">
-                    <input
-                      type="checkbox"
-                      checked={item.checked}
-                      onChange={(event) => updateResult(item.tempId, { checked: event.target.checked })}
-                    />
-                    导入这条设定
-                  </label>
-                  <div className="form-row">
-                    <label>
-                      类型
-                      <select
-                        value={item.type}
-                        onChange={(event) => updateResult(item.tempId, { type: event.target.value })}
-                      >
-                        {settingTypes.map((type) => (
-                          <option key={type.id} value={type.id}>
-                            {type.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      名称
-                      <input
-                        value={item.name}
-                        onChange={(event) => updateResult(item.tempId, { name: event.target.value })}
-                      />
-                    </label>
-                  </div>
-                  <label>
-                    核心设定
-                    <textarea
-                      rows={4}
-                      value={item.summary}
-                      onChange={(event) => updateResult(item.tempId, { summary: event.target.value })}
-                    />
-                  </label>
-                  <label>
-                    特征标签
-                    <input
-                      value={item.traits}
-                      onChange={(event) => updateResult(item.tempId, { traits: event.target.value })}
-                    />
-                  </label>
-                  <label>
-                    禁忌 / 不可违背
-                    <textarea
-                      rows={3}
-                      value={item.rules}
-                      onChange={(event) => updateResult(item.tempId, { rules: event.target.value })}
-                    />
-                  </label>
-                  {item.evidence && <small className="extract-evidence">依据：{item.evidence}</small>}
-                  <div className="card-actions">
-                    <button className="danger-button" type="button" onClick={() => removeResult(item.tempId)}>
-                      <Trash2 size={16} />
-                      移除
-                    </button>
-                  </div>
-                </article>
-              ))}
-            </div>
-          ) : (
-            <EmptyState text="先从章节或文本里提取候选设定，结果会出现在这里，确认后再导入设定库。" />
-          )}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function ThreadsTab({ project, mutate, working }) {
-  const threadFormKey = useMemo(() => makeWebDraftKey(project.id, "threads-form"), [project.id]);
-  const threadFilterKey = useMemo(() => makeWebDraftKey(project.id, "threads-filter"), [project.id]);
-  const [form, setForm, resetForm] = useWebDraftState(threadFormKey, buildForeshadowDraft());
-  const [statusFilter, setStatusFilter] = useWebDraftState(threadFilterKey, "全部");
-  const visibleForeshadows = project.foreshadows.filter(
-    (item) => statusFilter === "全部" || item.status === statusFilter
-  );
-
-  async function submit(event) {
-    event.preventDefault();
-    if (!form.content.trim()) return;
-    await mutate(`/api/projects/${project.id}/foreshadows`, form, "记录伏笔");
-    resetForm(buildForeshadowDraft());
-  }
-
-  return (
-    <section className="two-column">
-      <div className="panel">
-        <div className="panel-title">
-          <div>
-            <p className="eyebrow">Foreshadow</p>
-            <h2>伏笔管理器</h2>
-          </div>
-          <GitBranch size={20} />
-        </div>
-        <form className="editor-form" onSubmit={submit}>
-          <label>
-            伏笔内容
-            <textarea rows={4} value={form.content} onChange={(event) => setForm({ ...form, content: event.target.value })} placeholder="如：血玉只在主角濒死时发热。" />
-          </label>
-          <div className="form-row">
-            <label>
-              埋设章节
-              <input value={form.plantedChapter} onChange={(event) => setForm({ ...form, plantedChapter: event.target.value })} placeholder="第 3 章" />
-            </label>
-            <label>
-              预期回收
-              <input value={form.expectedPayoff} onChange={(event) => setForm({ ...form, expectedPayoff: event.target.value })} placeholder="第 12 章" />
-            </label>
-          </div>
-          <label>
-            相关人物 / 道具
-            <input value={form.related} onChange={(event) => setForm({ ...form, related: event.target.value })} placeholder="沈照夜、血玉、师父失踪" />
-          </label>
-          <label>
-            状态
-            <select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })}>
-              <option>未回收</option>
-              <option>回收中</option>
-              <option>已回收</option>
-            </select>
-          </label>
-          <button className="primary-button" disabled={Boolean(working)} type="submit">
-            <Plus size={17} />
-            记录伏笔
-          </button>
-        </form>
-      </div>
-
-      <div className="thread-board">
-        <div className="list-toolbar segmented">
-          {["全部", "未回收", "回收中", "已回收"].map((status) => (
-            <button key={status} className={statusFilter === status ? "active" : ""} onClick={() => setStatusFilter(status)} type="button">
-              {status}
-            </button>
-          ))}
-        </div>
-        {visibleForeshadows.length ? (
-          visibleForeshadows.map((item) => (
-            <article className={`thread-card ${item.status === "已回收" ? "done" : ""}`} key={item.id}>
-              <header>
-                <span>{item.status}</span>
-                <strong>{item.plantedChapter || "未标章节"}</strong>
-              </header>
-              <p>{item.content}</p>
-              <div className="thread-meta">
-                <span>预期：{item.expectedPayoff || "待定"}</span>
-                <span>相关：{item.related || "无"}</span>
-              </div>
-              <div className="card-actions">
-                {item.status !== "回收中" && item.status !== "已回收" && (
-                  <button className="secondary-button" disabled={Boolean(working)} onClick={() => mutate(`/api/projects/${project.id}/foreshadows/${item.id}/status`, { status: "回收中" }, "更新伏笔")}>
-                    回收中
-                  </button>
-                )}
-                {item.status !== "已回收" && (
-                  <button className="secondary-button" disabled={Boolean(working)} onClick={() => mutate(`/api/projects/${project.id}/foreshadows/${item.id}/status`, { status: "已回收" }, "更新伏笔")}>
-                    已回收
-                  </button>
-                )}
-              </div>
-              {item.warning && <small className="warning-text">{item.warning}</small>}
-            </article>
-          ))
-        ) : (
-          <EmptyState text="当前筛选下没有伏笔。" />
-        )}
-      </div>
-    </section>
-  );
-}
-
-function RewriteTab({ project, mutate, streamText, working, workspace, rewritePrefill, clearRewritePrefill }) {
-  const { selectedChapter, selectedDraft, selectedChapterId, setSelectedChapterId, applyRewrite, saveRewriteVersion } = workspace;
-  const rewriteDraftKey = useMemo(
-    () => makeWebDraftKey(project.id, `rewrite-${selectedChapterId || "default"}`),
-    [project.id, selectedChapterId]
-  );
-  const [form, setForm] = useWebDraftState(rewriteDraftKey, buildRewriteDraft());
-  const [isStreaming, setIsStreaming] = useState(false);
-  const isPartialRewrite =
-    form.sourceMode === "selection" && form.selectionContext?.chapterId === selectedChapterId;
-  const isModifyMode = form.mode === "modify";
-  const actionNoun = isModifyMode ? "修改" : "润色";
-  const versionLabel = buildTransformVersionLabel(form);
-
-  const source = form.followChapter ? selectedDraft?.content || "" : form.manualSource;
-  const canSubmit = source.trim() && (!isModifyMode || form.instruction.trim());
-
-  useEffect(() => {
-    if (!rewritePrefill || rewritePrefill.chapterId !== selectedChapterId) return;
-
-    setForm((current) => ({
-      ...current,
-      followChapter: false,
-      sourceMode: "selection",
-      selectionContext: rewritePrefill,
-      manualSource: rewritePrefill.selectedText,
-      result: ""
-    }));
-    clearRewritePrefill?.(null);
-  }, [rewritePrefill, selectedChapterId, setForm, clearRewritePrefill]);
-
-  useEffect(() => {
-    if (form.sourceMode !== "selection") return;
-    if (form.selectionContext?.chapterId === selectedChapterId) return;
-
-    setForm((current) => ({
-      ...current,
-      followChapter: true,
-      sourceMode: "chapter",
-      selectionContext: null,
-      manualSource: "",
-      result: ""
-    }));
-  }, [form.sourceMode, form.selectionContext, selectedChapterId, setForm]);
-
-  async function submit(event) {
-    event.preventDefault();
-    setIsStreaming(true);
-    setForm((current) => ({ ...current, result: "" }));
-
-    try {
-      const result = await streamText(
-        `/api/projects/${project.id}/transform/stream`,
-        {
-          mode: form.mode,
-          source,
-          style: isModifyMode ? undefined : form.style,
-          instruction: isModifyMode ? form.instruction : undefined,
-          tone: selectedDraft?.tone || project.defaultTone,
-          chapterId: selectedChapterId,
-          rewriteScope: isPartialRewrite ? "selection" : form.followChapter ? "chapter" : "manual",
-          selectionStart: isPartialRewrite ? form.selectionContext?.start : undefined,
-          selectionEnd: isPartialRewrite ? form.selectionContext?.end : undefined
-        },
-        isModifyMode ? "实时修改" : "实时润色",
-        {
-          onDelta: (_delta, fullText) => {
-            setForm((current) => ({ ...current, result: fullText }));
-          }
-        }
-      );
-      setForm((current) => ({ ...current, result }));
-    } finally {
-      setIsStreaming(false);
-    }
-  }
-
-  return (
-    <section className="two-column">
-      <div className="panel">
-        <div className="panel-title">
-          <div>
-            <p className="eyebrow">Transform</p>
-            <h2>润色 / 修改并同步当前章节</h2>
-          </div>
-          <Wand2 size={20} />
-        </div>
-        {project.chapters.length ? (
-          <form className="editor-form" onSubmit={submit}>
-            <div className="list-toolbar segmented">
-              <button
-                className={isModifyMode ? "" : "active"}
-                disabled={Boolean(working) || isStreaming}
-                onClick={() =>
-                  setForm((current) => ({
-                    ...current,
-                    mode: "polish",
-                    result: ""
-                  }))
-                }
-                type="button"
-              >
-                润色模式
-              </button>
-              <button
-                className={isModifyMode ? "active" : ""}
-                disabled={Boolean(working) || isStreaming}
-                onClick={() =>
-                  setForm((current) => ({
-                    ...current,
-                    mode: "modify",
-                    result: ""
-                  }))
-                }
-                type="button"
-              >
-                修改模式
-              </button>
-            </div>
-            <label>
-              目标章节
-              <select value={selectedChapterId} onChange={(event) => setSelectedChapterId(event.target.value)}>
-                {project.chapters.map((chapter) => (
-                  <option key={chapter.id} value={chapter.id}>
-                    第 {chapter.number} 章 · {chapter.title}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="inline-check">
-              <input
-                type="checkbox"
-                checked={form.followChapter}
-                onChange={(event) =>
-                  setForm((current) => ({
-                    ...current,
-                    followChapter: event.target.checked,
-                    sourceMode: event.target.checked ? "chapter" : "manual",
-                    selectionContext: event.target.checked ? null : current.selectionContext
-                  }))
-                }
-              />
-              跟随当前章节草稿实时同步
-            </label>
-            {isPartialRewrite && (
-              <div className="selection-callout">
-                <strong>当前为局部{actionNoun}</strong>
-                <span>
-                  第 {form.selectionContext.chapterNumber} 章 · 已锁定选中片段 {form.selectionContext.selectedText.length} 字
-                </span>
-              </div>
-            )}
-            <label>
-              原文
-              <textarea
-                rows={13}
-                value={source}
-                readOnly={form.followChapter}
-                onChange={(event) =>
-                  setForm((current) => ({
-                    ...current,
-                    manualSource: event.target.value,
-                    sourceMode: current.sourceMode === "selection" ? "selection" : "manual"
-                  }))
-                }
-                placeholder={isPartialRewrite ? "这里显示刚才选中的片段，你也可以在发送前微调。" : "粘贴或直接跟随章节草稿。"}
-              />
-            </label>
-            {isModifyMode ? (
-              <label>
-                修改要求
-                <textarea
-                  rows={4}
-                  value={form.instruction}
-                  onChange={(event) =>
-                    setForm((current) => ({
-                      ...current,
-                      instruction: event.target.value
-                    }))
-                  }
-                  placeholder={isPartialRewrite ? "例如：保留信息点，把这段改得更冷、更短、更像对峙。" : "例如：保留剧情事实，把整章改成第一人称；删掉直白解释；加强女主压迫感。"}
-                />
-              </label>
-            ) : (
-              <label>
-                改写方向
-                <select
-                  value={form.style}
-                  onChange={(event) =>
-                    setForm((current) => ({
-                      ...current,
-                      style: event.target.value
-                    }))
-                  }
-                >
-                  {rewriteStyles.map((style) => (
-                    <option key={style}>{style}</option>
-                  ))}
-                </select>
-              </label>
-            )}
-            <div className="editor-footer">
-              <span>当前章节语气：{selectedDraft?.tone || project.defaultTone}</span>
-              <span>原文字数：{source.trim().length}</span>
-              <span>
-                {isPartialRewrite
-                  ? "应用时只替换原选中片段，不会覆盖整章其他内容"
-                  : isModifyMode
-                    ? "会严格按修改要求输出一整段替换结果"
-                    : "当前模式会输出一整段润色结果"}
-              </span>
-            </div>
-            <button className="primary-button" disabled={Boolean(working) || isStreaming || !canSubmit} type="submit">
-              <Wand2 size={17} />
-              {isStreaming ? `正在实时${actionNoun}...` : isPartialRewrite ? `开始实时局部${actionNoun}` : `开始实时${actionNoun}`}
-            </button>
-          </form>
-        ) : (
-          <EmptyState text="还没有章节可供润色或修改。" />
-        )}
-      </div>
-
-      <div className="panel result-panel">
-        <div className="panel-title">
-          <div>
-            <p className="eyebrow">Result</p>
-            <h2>{actionNoun}结果</h2>
-          </div>
-          <MessageSquareText size={20} />
-        </div>
-        {isStreaming && <p className="stream-hint">正在实时{actionNoun}，结果会持续写入下面的文本框。</p>}
-        {form.result ? (
-          <>
-            <textarea className="rewrite-result-textarea" value={form.result} onChange={(event) => setForm((current) => ({ ...current, result: event.target.value }))} />
-            <div className="card-actions">
-              <button
-                className="primary-button"
-                disabled={Boolean(working) || !selectedChapter}
-                onClick={() =>
-                  selectedChapter &&
-                  applyRewrite(selectedChapter.id, {
-                    content: form.result,
-                    style: versionLabel,
-                    scope: isPartialRewrite ? "selection" : "chapter",
-                    selectionContext: isPartialRewrite ? form.selectionContext : null
-                  })
-                }
-                type="button"
-              >
-                <Save size={16} />
-                {isPartialRewrite ? "替换选中片段" : "一键覆盖当前章节"}
-              </button>
-              <button
-                className="secondary-button"
-                disabled={Boolean(working) || !selectedChapter}
-                onClick={() =>
-                  selectedChapter &&
-                  saveRewriteVersion(selectedChapter.id, {
-                    content: form.result,
-                    style: versionLabel,
-                    scope: isPartialRewrite ? "selection" : "chapter",
-                    selectionContext: isPartialRewrite ? form.selectionContext : null
-                  })
-                }
-                type="button"
-              >
-                <Plus size={16} />
-                {isPartialRewrite ? "保存为局部替换后的版本" : "另存为新版本"}
-              </button>
-            </div>
-          </>
-        ) : (
-          <EmptyState text={`${actionNoun}结果会显示在这里，并可直接覆盖章节或另存版本。`} />
-        )}
-      </div>
-    </section>
-  );
-}
-
-function IoLogsTab({ project }) {
-  const logs = project.ioLogs || [];
-
-  return (
-    <section className="two-column">
-      <div className="panel">
-        <div className="panel-title">
-          <div>
-            <p className="eyebrow">Workflow Config</p>
-            <h2>智能体协作与 I/O 记录</h2>
-          </div>
-          <BrainCircuit size={20} />
-        </div>
-        <p>
-          章节生成的 contract / planner / writer / guard / repair 协作配置现在集中在 <code>server/ai-config.js</code>。
-          这里展示最近 120 条输入输出记录，方便排查章节号漂移、提示词和协作效果。
-        </p>
-        <div className="editor-footer">
-          <span>配置文件：server/ai-config.js</span>
-          <span>最近记录：{logs.length}</span>
-        </div>
-      </div>
-
-      <div className="panel result-panel">
-        <div className="panel-title">
-          <div>
-            <p className="eyebrow">Recent Logs</p>
-            <h2>I/O 明细</h2>
-          </div>
-          <MessageSquareText size={20} />
-        </div>
-        {logs.length ? (
-          <div className="io-log-list">
-            {logs.map((log) => {
-              const chapter = project.chapters.find((item) => item.id === log.chapterId);
-              return (
-                <details className="io-log-card" key={log.id}>
-                  <summary className="io-log-summary">
-                    <div>
-                      <strong>{log.workflow} / {log.stage}</strong>
-                      <small>{formatTime(log.createdAt)}</small>
-                    </div>
-                    <span className={`io-log-status ${log.status}`}>{log.status === "error" ? "失败" : "成功"}</span>
-                  </summary>
-                  <div className="io-log-meta">
-                    <span>{chapter ? `第 ${chapter.number} 章 · ${chapter.title}` : "未绑定章节"}</span>
-                    <span>{log.provider || "local"}{log.model ? ` / ${log.model}` : ""}</span>
-                  </div>
-                  <div className="io-log-grid">
-                    <div>
-                      <strong>输入</strong>
-                      <pre className="io-log-pre">{formatJsonBlock(log.inputPayload)}</pre>
-                    </div>
-                    <div>
-                      <strong>输出</strong>
-                      <pre className="io-log-pre">{log.outputText || formatJsonBlock(log.outputPayload)}</pre>
-                    </div>
-                  </div>
-                </details>
-              );
-            })}
-          </div>
-        ) : (
-          <EmptyState text="还没有 I/O 记录。生成章节、润色、修改或扩写后，这里会自动出现明细。" />
-        )}
-      </div>
-    </section>
-  );
-}
-
-function mapStoryStateSourceLabel(source) {
-  if (source === "generate_commit") return "生成入库";
-  if (source === "regenerate_commit") return "重生成入库";
-  if (source === "rewrite_apply") return "改写覆盖";
-  if (source === "manual_save") return "手动保存";
-  if (source === "backfill") return "历史回填";
-  return "状态更新";
-}
-
-function mapRelationshipKindLabel(kind) {
-  if (kind === "alliance") return "结盟";
-  if (kind === "tension") return "对抗";
-  if (kind === "reveal") return "揭示";
-  return "聚焦";
-}
-
-function mapStoryHeatLabel(heat) {
-  if (heat === "hot") return "高热";
-  if (heat === "warm") return "持续";
-  return "待激活";
-}
-
-function StoryStateOverview({ project, compact = false }) {
-  const summary = project.storyStateSummary || {};
-  const latestEvent = summary.latestEvent;
-  const activeEntities = (summary.activeEntities || []).slice(0, compact ? 6 : 10);
-  const relationshipThreads = (summary.relationshipThreads || []).slice(0, compact ? 4 : 8);
-  const carryovers = (summary.carryovers || []).slice(0, compact ? 4 : 8);
-  const pressureWarnings = (summary.pressureWarnings || []).slice(0, compact ? 3 : 6);
-  const foreshadowBoard = (summary.foreshadowBoard || []).slice(0, compact ? 4 : 8);
-
-  if (!latestEvent) {
-    return <EmptyState text="章节入库后会自动生成故事状态 diff、承接压力和影响面。" />;
-  }
-
-  return (
-    <div className="story-state-shell">
-      <div className="story-state-metrics">
-        <div className="metric compact">
-          <span>最近状态更新</span>
-          <strong>第 {latestEvent.chapterNumber} 章</strong>
-        </div>
-        <div className="metric compact">
-          <span>活跃锚点</span>
-          <strong>{summary.activeEntities?.length || 0}</strong>
-        </div>
-        <div className="metric compact">
-          <span>关系线程</span>
-          <strong>{summary.relationshipThreads?.length || 0}</strong>
-        </div>
-        <div className="metric compact">
-          <span>待承接项</span>
-          <strong>{summary.carryovers?.length || 0}</strong>
-        </div>
-      </div>
-
-      <article className="story-state-latest">
-        <header>
-          <div>
-            <span>{mapStoryStateSourceLabel(latestEvent.source)}</span>
-            <strong>第 {latestEvent.chapterNumber} 章 · {latestEvent.chapterTitle}</strong>
-          </div>
-          <small>{formatTime(latestEvent.createdAt)}</small>
-        </header>
-        <p>{latestEvent.summary || "本章状态已更新。"}</p>
-      </article>
-
-      <div className="story-state-grid">
-        <div className="story-state-card">
-          <strong>活跃实体</strong>
-          {activeEntities.length ? (
-            <div className="story-chip-list">
-              {activeEntities.map((item) => (
-                <span key={item.settingId} className={`story-chip ${item.heat || "cool"}`}>
-                  {item.name} · {mapStoryHeatLabel(item.heat)}
-                </span>
-              ))}
-            </div>
-          ) : (
-            <small>暂时没有稳定锚点。</small>
-          )}
-        </div>
-
-        <div className="story-state-card">
-          <strong>关系线程</strong>
-          {relationshipThreads.length ? (
-            <div className="story-line-list">
-              {relationshipThreads.map((item) => (
-                <div key={`${item.pair.join("-")}-${item.lastChapterNumber}`} className="story-line-item">
-                  <span>{item.pair.join(" / ")}</span>
-                  <small>{mapRelationshipKindLabel(item.kind)} · 第 {item.lastChapterNumber} 章</small>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <small>当前没有需要重点承接的关系变化。</small>
-          )}
-        </div>
-
-        <div className="story-state-card">
-          <strong>下一章压力</strong>
-          {carryovers.length ? (
-            <ul className="story-bullet-list">
-              {carryovers.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
-          ) : (
-            <small>暂时没有明显堆积项。</small>
-          )}
-        </div>
-
-        <div className="story-state-card">
-          <strong>伏笔看板</strong>
-          {foreshadowBoard.length ? (
-            <div className="story-line-list">
-              {foreshadowBoard.map((item) => (
-                <div key={item.id} className="story-line-item">
-                  <span>{summarizeInlineText(item.content, compact ? 28 : 42)}</span>
-                  <small>
-                    {item.status}
-                    {item.lastTouchedChapterNumber ? ` · 最近触达第 ${item.lastTouchedChapterNumber} 章` : ""}
-                  </small>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <small>还没有伏笔状态。</small>
-          )}
-        </div>
-      </div>
-
-      {pressureWarnings.length ? (
-        <div className="story-warning-box">
-          {pressureWarnings.map((item) => (
-            <p key={item}>{item}</p>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function StoryStateTab({ project }) {
-  const events = project.storyStateEvents || [];
-
-  return (
-    <section className="two-column">
-      <div className="panel">
-        <div className="panel-title">
-          <div>
-            <p className="eyebrow">Story Graph</p>
-            <h2>当前故事状态</h2>
-          </div>
-          <Clock3 size={20} />
-        </div>
-        <StoryStateOverview project={project} />
-      </div>
-
-      <div className="panel result-panel">
-        <div className="panel-title">
-          <div>
-            <p className="eyebrow">State Timeline</p>
-            <h2>状态时间线与影响面</h2>
-          </div>
-          <GitBranch size={20} />
-        </div>
-        {events.length ? (
-          <div className="story-event-list">
-            {events.map((event) => (
-              <article className="story-event-card" key={event.id}>
-                <header>
-                  <div>
-                    <span>{mapStoryStateSourceLabel(event.source)}</span>
-                    <strong>第 {event.chapterNumber} 章 · {event.chapterTitle}</strong>
-                  </div>
-                  <small>{formatTime(event.createdAt)}</small>
-                </header>
-                <p>{event.summary || "本章状态已记录。"}</p>
-
-                {(event.stateDiff?.activatedSettings || []).length ? (
-                  <div className="story-event-section">
-                    <strong>触达设定</strong>
-                    <div className="story-chip-list">
-                      {event.stateDiff.activatedSettings.map((item) => (
-                        <span key={`${event.id}-${item.settingId}`} className="story-chip warm">
-                          {item.name}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-
-                {(event.stateDiff?.relationshipSignals || []).length ? (
-                  <div className="story-event-section">
-                    <strong>关系变化</strong>
-                    <ul className="story-bullet-list tight">
-                      {event.stateDiff.relationshipSignals.map((item, index) => (
-                        <li key={`${event.id}-rel-${index}`}>
-                          {item.pair.join(" / ")} · {mapRelationshipKindLabel(item.kind)}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                ) : null}
-
-                {(event.impactSummary?.nextChapterPressure || []).length ? (
-                  <div className="story-event-section">
-                    <strong>下一章要承接</strong>
-                    <ul className="story-bullet-list tight">
-                      {event.impactSummary.nextChapterPressure.map((item) => (
-                        <li key={`${event.id}-carry-${item}`}>{item}</li>
-                      ))}
-                    </ul>
-                  </div>
-                ) : null}
-
-                {(event.impactSummary?.affectedChapters || []).length ? (
-                  <div className="story-event-section">
-                    <strong>受影响章节</strong>
-                    <div className="story-line-list">
-                      {event.impactSummary.affectedChapters.map((item) => (
-                        <div key={`${event.id}-${item.chapterId}`} className="story-line-item">
-                          <span>第 {item.chapterNumber} 章 · {item.chapterTitle}</span>
-                          <small>{item.reason}</small>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-
-                {(event.impactSummary?.risks || []).length ? (
-                  <div className="story-warning-box compact">
-                    {event.impactSummary.risks.map((item) => (
-                      <p key={`${event.id}-risk-${item}`}>{item}</p>
-                    ))}
-                  </div>
-                ) : null}
-              </article>
-            ))}
-          </div>
-        ) : (
-          <EmptyState text="故事状态事件会在章节入库、手动保存或覆盖改写后自动出现。" />
-        )}
-      </div>
-
-      <div className="panel wide">
-        <div className="panel-title">
-          <div>
-            <p className="eyebrow">Plot Map</p>
-            <h2>章节地图</h2>
-          </div>
-          <GitBranch size={20} />
-        </div>
-        <PlotMap project={project} />
-      </div>
-    </section>
-  );
-}
-
-function PlotMap({ project }) {
-  if (!project.chapters.length) {
-    return <EmptyState text="章节生成后会形成情节地图。" />;
-  }
-
-  return (
-    <div className="plot-map">
-      {project.chapters.map((chapter) => (
-        <article className="plot-node" key={chapter.id}>
-          <span>第 {chapter.number} 章</span>
-          <strong>{chapter.title}</strong>
-          <div>
-            {chapter.beats.slice(0, 4).map((beat) => (
-              <small key={beat}>{beat}</small>
-            ))}
-          </div>
-        </article>
-      ))}
-    </div>
-  );
-}
-
-function ReportCard({ report }) {
-  const riskClass = report.score >= 80 ? "good" : report.score >= 60 ? "medium" : "high";
-  return (
-    <article className={`report-card ${riskClass}`}>
-      <header>
-        <span>风险评分</span>
-        <strong>{report.score}</strong>
-      </header>
-      <div className="report-lines">
-        {report.findings.map((finding) => (
-          <p key={`${finding.level}-${finding.title}`}>
-            <b>{finding.level}</b>
-            {finding.title}：{finding.detail}
-          </p>
-        ))}
-      </div>
-    </article>
-  );
-}
-
-function EmptyState({ text }) {
-  return (
-    <div className="empty-state">
-      <BookOpen size={20} />
-      <span>{text}</span>
     </div>
   );
 }

@@ -122,6 +122,7 @@ export function buildChapterPlannerMessages({
         `核心冲突：${stageConflict}`,
         `章节语气：${input.tone}`,
         `目标字数：${input.wordCount}`,
+        input.researchNotes ? `MCP 补充上下文：\n${input.researchNotes}` : "",
         stageHook ? `期望结尾钩子：${stageHook}` : "期望结尾钩子：无，允许自然收束",
         `章节契约：\n${summarizeChapterContract(contract)}`,
         `约束分层：\n${summarizeConstraintLayers(contract?.constraintLayers)}`,
@@ -172,6 +173,7 @@ export function buildChapterWriterMessages({
         `章节标题：${displayTitle}`,
         `章节语气：${input.tone}`,
         `目标字数：${input.wordCount}`,
+        input.researchNotes ? `MCP 补充上下文：\n${input.researchNotes}` : "",
         `章节契约：\n${summarizeChapterContract(contract)}`,
         `约束分层：\n${summarizeConstraintLayers(contract?.constraintLayers)}`,
         `设定库：\n${settingsSummary || "暂无设定"}`,
@@ -222,6 +224,7 @@ export function buildChapterGuardMessages({
         `章节语气：${input.tone}`,
         `目标字数：${input.wordCount}`,
         `阶段：${phase === "preflight" ? "正文生成前审查" : "正文生成后审查"}`,
+        input.researchNotes ? `MCP 补充上下文：\n${input.researchNotes}` : "",
         `设定库：\n${settingsSummary || "暂无设定"}`,
         `章节契约：\n${summarizeChapterContract(contract)}`,
         `约束分层：\n${summarizeConstraintLayers(contract?.constraintLayers)}`,
@@ -267,6 +270,7 @@ export function buildChapterRepairMessages({
         `章节序号：第 ${chapterNumber} 章`,
         `章节标题：${displayTitle}`,
         `章节语气：${input.tone}`,
+        input.researchNotes ? `MCP 补充上下文：\n${input.researchNotes}` : "",
         `设定库：\n${settingsSummary || "暂无设定"}`,
         `章节契约：\n${summarizeChapterContract(contract)}`,
         `约束分层：\n${summarizeConstraintLayers(contract?.constraintLayers)}`,
@@ -302,6 +306,7 @@ export function buildTransformMessages({ project, settingsSummary, input }) {
         `类型：${project.genre}`,
         `创作台语气：${project.defaultTone}`,
         `章节语气：${input.tone}`,
+        input.researchNotes ? `补充上下文：\n${input.researchNotes}` : "",
         mode === "modify"
           ? `修改要求：${input.instruction || "在不破坏设定的前提下完成修改"}`
           : `改写方向：${input.style}`,
@@ -312,6 +317,50 @@ export function buildTransformMessages({ project, settingsSummary, input }) {
         "",
         `原文：\n${input.source}`
       ].join("\n")
+    }
+  ];
+}
+
+export function buildHumanizeMessages({ project, settingsSummary, input, skillName = "", skillPrompt = "" }) {
+  const modeLabel =
+    input.pipeline === "chapter_final"
+      ? "chapter final pass"
+      : input.pipeline === "transform_final"
+        ? "transform final pass"
+        : "final pass";
+
+  return [
+    {
+      role: "system",
+      content: [
+        "You are the final humanization editor for long-form prose.",
+        "Return only the rewritten text.",
+        "Preserve plot facts, setting rules, chronology, paragraph intent, named entities, and the author's editing intent.",
+        "Do not add meta commentary. Do not invent new facts. Do not turn cautious statements into stronger claims.",
+        input.headingLine ? `The first non-empty line must stay exactly: ${input.headingLine}` : "",
+        skillPrompt
+          ? `Loaded compatible skill${skillName ? ` (${skillName})` : ""}:\n${skillPrompt}`
+          : ""
+      ]
+        .filter(Boolean)
+        .join("\n\n")
+    },
+    {
+      role: "user",
+      content: [
+        `Project: ${project.title}`,
+        `Genre: ${project.genre}`,
+        `Default tone: ${project.defaultTone}`,
+        `Chapter tone: ${input.tone}`,
+        `Pass: ${modeLabel}`,
+        input.style ? `Style intent: ${input.style}` : "",
+        input.instruction ? `Edit intent: ${input.instruction}` : "",
+        `Settings summary:\n${settingsSummary || "None"}`,
+        "",
+        `Source text:\n${input.source}`
+      ]
+        .filter(Boolean)
+        .join("\n")
     }
   ];
 }
@@ -346,6 +395,9 @@ export function buildSettingExtractionMessages({ project, settingsSummary, input
         `书名：${project.title}`,
         `类型：${project.genre}`,
         `创作台语气：${project.defaultTone}`,
+        input.researchNotes
+          ? `MCP 补充上下文：\n${input.researchNotes}`
+          : "",
         input.chapterTitle
           ? `来源章节：第 ${input.chapterNumber || "?"} 章 ${input.chapterTitle}`
           : `来源类型：${input.sourceMode === "chapter" ? "已有章节" : "外部文本"}`,

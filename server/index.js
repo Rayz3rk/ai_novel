@@ -8,10 +8,24 @@ import {
   buildChapterPlannerMessages,
   buildChapterRepairMessages,
   buildChapterWriterMessages,
+  buildHumanizeMessages,
   buildSettingExtractionMessages,
   buildTransformMessages
 } from "./ai-config.js";
 import { exportChapterFile, exportProjectFile, setDownloadHeaders } from "./exporters.js";
+import {
+  applyLocalHumanizer,
+  buildHumanizerSkillPrompt,
+  getHumanizeMode,
+  pickHumanizerSkill,
+  readSkillCatalog,
+  serializeSkillCatalog
+} from "./skills-runtime.js";
+import {
+  callMcpTool,
+  readMcpRuntimeState,
+  saveMcpServerConfig
+} from "./mcp-runtime.js";
 
 const { Pool } = pg;
 
@@ -125,6 +139,9 @@ const normalizeTone = (value, fallback = "热血") => {
   const next = String(value || "").trim();
   return next || fallback;
 };
+
+const normalizeHumanizeEnabled = (value, fallback = true) =>
+  value === undefined ? fallback : value !== false;
 
 const normalizeTransformMode = (value) => (String(value || "").trim().toLowerCase() === "modify" ? "modify" : "polish");
 
@@ -621,6 +638,8 @@ function toProject(row) {
     targetAudience: row.target_audience,
     status: row.status,
     defaultTone: row.default_tone,
+    humanizeEnabled: row.humanize_enabled !== false,
+    humanizeSkillId: row.humanize_skill_id || "",
     createdAt: row.created_at,
     settings: [],
     chapters: [],
@@ -1234,7 +1253,9 @@ async function initDb() {
     );
 
     ALTER TABLE projects
-      ADD COLUMN IF NOT EXISTS default_tone TEXT NOT NULL DEFAULT '热血';
+      ADD COLUMN IF NOT EXISTS default_tone TEXT NOT NULL DEFAULT '热血',
+      ADD COLUMN IF NOT EXISTS humanize_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      ADD COLUMN IF NOT EXISTS humanize_skill_id TEXT NOT NULL DEFAULT '';
 
     CREATE TABLE IF NOT EXISTS settings (
       id TEXT PRIMARY KEY,
@@ -1632,7 +1653,9 @@ async function readData() {
     ioLogsResult,
     generationSessionsResult,
     storyStateEventsResult,
-    aiConfigState
+    aiConfigState,
+    skillsCatalog,
+    mcpState
   ] = await Promise.all([
     pool.query("SELECT * FROM projects ORDER BY created_at DESC"),
     pool.query("SELECT * FROM settings ORDER BY project_id ASC, type ASC, category_number ASC, created_at ASC"),
@@ -1645,7 +1668,9 @@ async function readData() {
       "SELECT * FROM generation_sessions WHERE status = 'pending' ORDER BY updated_at DESC, created_at DESC LIMIT 48"
     ),
     pool.query("SELECT * FROM story_state_events ORDER BY created_at DESC, chapter_number DESC"),
-    readAiConfigState()
+    readAiConfigState(),
+    readSkillCatalog(),
+    readMcpRuntimeState()
   ]);
 
   const projects = projectsResult.rows.map(toProject);
@@ -1693,7 +1718,9 @@ async function readData() {
 
   return {
     projects,
-    aiConfig: aiConfigState
+    aiConfig: aiConfigState,
+    skills: serializeSkillCatalog(skillsCatalog),
+    mcp: mcpState
   };
 }
 
@@ -2490,7 +2517,700 @@ function buildNormalizedChapterInput(project, input) {
     tone: normalizeTone(input.tone, project.defaultTone),
     wordCount: Number(input.wordCount || 1800),
     selectedSettingIds: normalizeSelectedSettingIds(input.selectedSettingIds, project),
+    selectedServerIds: Array.isArray(input.selectedServerIds)
+      ? input.selectedServerIds.map((item) => String(item || "").trim()).filter(Boolean)
+      : [],
+    useMcp: input.useMcp === true,
+    useSubagents: input.useSubagents === true,
+    researchNotes: String(input.researchNotes || "").trim(),
     constraintPolicy: normalizeConstraintPolicy(input.constraintPolicy)
+  };
+}
+
+async function buildChapterResearchNotes({
+  project,
+  input,
+  chapterNumber,
+  title,
+  workflow,
+  aiConfig
+}) {
+  if (!input.useMcp || !isRemoteAiProvider(aiConfig.provider)) {
+    return "";
+  }
+
+  const settingsSummary = buildSettingsSummary(project, input.selectedSettingIds);
+  const recentChapters = [...(project.chapters || [])]
+    .sort((left, right) => (Number(left.number) || 0) - (Number(right.number) || 0))
+    .slice(-3)
+    .map((chapter) =>
+      [
+        `第 ${chapter.number} 章 ${chapter.title}`,
+        chapter.goal ? `目标：${chapter.goal}` : "",
+        chapter.conflict ? `冲突：${chapter.conflict}` : "",
+        chapter.hook ? `收束：${chapter.hook}` : ""
+      ]
+        .filter(Boolean)
+        .join("\n")
+    )
+    .join("\n\n");
+
+  try {
+    const researchPass = await runMcpAgentLoop({
+      project,
+      task: [
+        "请先用可用的 MCP tools 为下面这次章节生成补充可靠上下文。",
+        "重点只保留：与本章目标直接相关的设定依据、连续性提醒、人物关系状态、世界规则限制、地点/道具/能力边界、可直接写入 contract 或 plan 的硬约束。",
+        "不要编造剧情，不要替用户改目标，不要输出闲聊，只输出精炼研究笔记。",
+        "",
+        `目标章节：第 ${chapterNumber} 章${title ? ` ${title}` : ""}`,
+        `本章目标：${input.goal?.trim() || "未显式指定"}`,
+        `核心冲突：${input.conflict?.trim() || "未显式指定"}`,
+        input.hook?.trim() ? `期望结尾钩子：${input.hook.trim()}` : "期望结尾钩子：允许自然收束",
+        `已选设定：\n${settingsSummary || "暂无设定"}`,
+        `最近章节：\n${recentChapters || "暂无已完成章节"}`
+      ].join("\n"),
+      systemPrompt: "Only use tools when they add concrete evidence or continuity constraints for chapter generation.",
+      selectedServerIds: input.selectedServerIds,
+      workflow,
+      stage: "mcp_research",
+      persistLog: true
+    });
+
+    return String(researchPass.finalText || "").trim();
+  } catch (error) {
+    await recordIoLog({
+      projectId: project.id,
+      chapterId: input.chapterId || "",
+      workflow,
+      stage: "mcp_research",
+      status: "error",
+      inputPayload: {
+        useMcp: true,
+        selectedServerIds: input.selectedServerIds
+      },
+      outputText: error.message || "MCP research failed"
+    });
+    return "";
+  }
+}
+
+function buildChapterSubAgentContext(project, input, chapterNumber, title, contract) {
+  const settingsSummary = buildSettingsSummary(project, input.selectedSettingIds);
+  const recentChapters = [...(project.chapters || [])]
+    .sort((left, right) => (Number(left.number) || 0) - (Number(right.number) || 0))
+    .slice(-3)
+    .map((chapter) =>
+      [
+        `第 ${chapter.number} 章 ${chapter.title}`,
+        chapter.goal ? `目标：${chapter.goal}` : "",
+        chapter.conflict ? `冲突：${chapter.conflict}` : "",
+        chapter.hook ? `收束：${chapter.hook}` : ""
+      ]
+        .filter(Boolean)
+        .join("\n")
+    )
+    .join("\n\n");
+
+  return [
+    `书名：${project.title}`,
+    `类型：${project.genre}`,
+    `核心卖点：${project.premise}`,
+    `目标章节：${buildChapterHeading(chapterNumber, title)}`,
+    `本章目标：${input.goal?.trim() || "未显式指定"}`,
+    `核心冲突：${input.conflict?.trim() || "未显式指定"}`,
+    input.hook?.trim() ? `期望结尾钩子：${input.hook.trim()}` : "期望结尾钩子：允许自然收束",
+    `章节语气：${input.tone}`,
+    `目标字数：${input.wordCount}`,
+    input.researchNotes ? `MCP 研究笔记：\n${input.researchNotes}` : "",
+    `当前 contract：\n${JSON.stringify(contract, null, 2)}`,
+    `已选设定：\n${settingsSummary || "暂无设定"}`,
+    `最近章节：\n${recentChapters || "暂无已完成章节"}`
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+async function runSubAgentTextStage({
+  projectId,
+  chapterId,
+  workflow,
+  stage,
+  roleName,
+  systemPrompt,
+  userPrompt,
+  aiConfig,
+  temperature = 0.25
+}) {
+  const messages = [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userPrompt }
+  ];
+  try {
+    return await callOpenAICompatible(messages, aiConfig, { temperature });
+  } catch (error) {
+    await recordIoLog({
+      projectId,
+      chapterId,
+      workflow,
+      stage,
+      status: "error",
+      provider: aiConfig.provider,
+      model: aiConfig.model,
+      inputPayload: {
+        roleName,
+        temperature,
+        messages
+      },
+      outputText: error.message
+    });
+    throw error;
+  }
+}
+
+function parseChapterScoutPatch(text) {
+  const parsed = parseJsonObject(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {
+      summary: "",
+      contractPatch: {},
+      notes: []
+    };
+  }
+
+  const contractPatch = {};
+  const mustUseSettings = normalizeWorkflowList(parsed.mustUseSettings, [], 8);
+  const mustMention = normalizeWorkflowList(parsed.mustMention, [], 8);
+  const continuity = normalizeWorkflowList(parsed.continuity, [], 10);
+  const forbidden = normalizeWorkflowList(parsed.forbidden, [], 10);
+
+  if (mustUseSettings.length) contractPatch.mustUseSettings = mustUseSettings;
+  if (mustMention.length) contractPatch.mustMention = mustMention;
+  if (continuity.length) contractPatch.continuity = continuity;
+  if (forbidden.length) contractPatch.forbidden = forbidden;
+
+  return {
+    summary: normalizeWorkflowText(parsed.summary, ""),
+    contractPatch,
+    notes: normalizeWorkflowList(parsed.notes, [], 6)
+  };
+}
+
+function parseChapterArchitectPatch(text) {
+  const parsed = parseJsonObject(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {
+      summary: "",
+      planPatch: {}
+    };
+  }
+
+  const planPatch = {};
+  const narrativeMode = normalizeWorkflowText(parsed.narrativeMode, "");
+  const planSummary = normalizeWorkflowText(parsed.planSummary ?? parsed.summary, "");
+  const beats = normalizeWorkflowList(parsed.beats, [], 8);
+  const mustKeep = normalizeWorkflowList(parsed.mustKeep, [], 8);
+  const mustMention = normalizeWorkflowList(parsed.mustMention, [], 8);
+  const mustUseSettings = normalizeWorkflowList(parsed.mustUseSettings, [], 8);
+  const continuity = normalizeWorkflowList(parsed.continuity, [], 10);
+  const forbidden = normalizeWorkflowList(parsed.forbidden, [], 10);
+  const endingMode = ["natural", "open", "hook"].includes(String(parsed.endingMode || "").trim())
+    ? String(parsed.endingMode).trim()
+    : "";
+  const endingNote = normalizeWorkflowText(parsed.endingNote, "");
+
+  if (narrativeMode) planPatch.narrativeMode = narrativeMode;
+  if (planSummary) planPatch.summary = planSummary;
+  if (beats.length) planPatch.beats = beats;
+  if (mustKeep.length) planPatch.mustKeep = mustKeep;
+  if (mustMention.length) planPatch.mustMention = mustMention;
+  if (mustUseSettings.length) planPatch.mustUseSettings = mustUseSettings;
+  if (continuity.length) planPatch.continuity = continuity;
+  if (forbidden.length) planPatch.forbidden = forbidden;
+  if (endingMode) planPatch.endingMode = endingMode;
+  if (endingNote) planPatch.endingNote = endingNote;
+
+  return {
+    summary: normalizeWorkflowText(parsed.summary, ""),
+    planPatch
+  };
+}
+
+function parseChapterReviewerPatch(text) {
+  const parsed = parseJsonObject(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {
+      verdict: "accept",
+      summary: "",
+      contractPatch: {},
+      planPatch: {},
+      notes: []
+    };
+  }
+
+  const contractPatch = {};
+  const mustUseSettings = normalizeWorkflowList(parsed.contractPatch?.mustUseSettings, [], 8);
+  const mustMention = normalizeWorkflowList(parsed.contractPatch?.mustMention, [], 8);
+  const continuity = normalizeWorkflowList(parsed.contractPatch?.continuity, [], 10);
+  const forbidden = normalizeWorkflowList(parsed.contractPatch?.forbidden, [], 10);
+  if (mustUseSettings.length) contractPatch.mustUseSettings = mustUseSettings;
+  if (mustMention.length) contractPatch.mustMention = mustMention;
+  if (continuity.length) contractPatch.continuity = continuity;
+  if (forbidden.length) contractPatch.forbidden = forbidden;
+
+  const planPatch = {};
+  const narrativeMode = normalizeWorkflowText(parsed.planPatch?.narrativeMode, "");
+  const planSummary = normalizeWorkflowText(parsed.planPatch?.summary, "");
+  const beats = normalizeWorkflowList(parsed.planPatch?.beats, [], 8);
+  const mustKeep = normalizeWorkflowList(parsed.planPatch?.mustKeep, [], 8);
+  const reviewerMustMention = normalizeWorkflowList(parsed.planPatch?.mustMention, [], 8);
+  const reviewerMustUseSettings = normalizeWorkflowList(parsed.planPatch?.mustUseSettings, [], 8);
+  const reviewerContinuity = normalizeWorkflowList(parsed.planPatch?.continuity, [], 10);
+  const reviewerForbidden = normalizeWorkflowList(parsed.planPatch?.forbidden, [], 10);
+  const endingMode = ["natural", "open", "hook"].includes(
+    String(parsed.planPatch?.endingMode || "").trim()
+  )
+    ? String(parsed.planPatch.endingMode).trim()
+    : "";
+  const endingNote = normalizeWorkflowText(parsed.planPatch?.endingNote, "");
+  if (narrativeMode) planPatch.narrativeMode = narrativeMode;
+  if (planSummary) planPatch.summary = planSummary;
+  if (beats.length) planPatch.beats = beats;
+  if (mustKeep.length) planPatch.mustKeep = mustKeep;
+  if (reviewerMustMention.length) planPatch.mustMention = reviewerMustMention;
+  if (reviewerMustUseSettings.length) planPatch.mustUseSettings = reviewerMustUseSettings;
+  if (reviewerContinuity.length) planPatch.continuity = reviewerContinuity;
+  if (reviewerForbidden.length) planPatch.forbidden = reviewerForbidden;
+  if (endingMode) planPatch.endingMode = endingMode;
+  if (endingNote) planPatch.endingNote = endingNote;
+
+  return {
+    verdict: ["accept", "revise"].includes(String(parsed.verdict || "").trim())
+      ? String(parsed.verdict).trim()
+      : "accept",
+    summary: normalizeWorkflowText(parsed.summary, ""),
+    contractPatch,
+    planPatch,
+    notes: normalizeWorkflowList(parsed.notes, [], 6)
+  };
+}
+
+function summarizeSubAgentOutput(orchestration) {
+  if (!orchestration) return "";
+  return [
+    orchestration.scout?.summary ? `Scout：${orchestration.scout.summary}` : "",
+    orchestration.architect?.summary ? `Architect：${orchestration.architect.summary}` : "",
+    orchestration.reviewer?.summary ? `Reviewer：${orchestration.reviewer.summary}` : ""
+  ]
+    .filter(Boolean)
+    .join(" | ");
+}
+
+async function runChapterSubAgentOrchestration({
+  project,
+  input,
+  chapterNumber,
+  title,
+  contract,
+  workflow,
+  aiConfig
+}) {
+  const sharedContext = buildChapterSubAgentContext(project, input, chapterNumber, title, contract);
+
+  const scoutRaw = await runSubAgentTextStage({
+    projectId: project.id,
+    chapterId: input.chapterId || "",
+    workflow,
+    stage: "subagents",
+    roleName: "context_scout",
+    systemPrompt: [
+      "你是章节生成流程中的 Context Scout。",
+      "职责：只提炼对本章真正有用的设定依据、连续性提醒、人物关系状态和世界规则限制。",
+      "只返回 JSON，不要 Markdown，不要解释。",
+      'JSON schema: {"summary":"一句话总结本章最危险的约束点","mustUseSettings":["必须直接调用的设定"],"mustMention":["必须照应的人物/信息"],"continuity":["必须承接的连续性提醒"],"forbidden":["不能越界的点"],"notes":["给后续 agent 的短提醒"]}'
+    ].join("\n"),
+    userPrompt: sharedContext,
+    aiConfig,
+    temperature: 0.2
+  });
+  const scout = parseChapterScoutPatch(scoutRaw);
+
+  const architectRaw = await runSubAgentTextStage({
+    projectId: project.id,
+    chapterId: input.chapterId || "",
+    workflow,
+    stage: "subagents",
+    roleName: "beat_architect",
+    systemPrompt: [
+      "你是章节生成流程中的 Beat Architect。",
+      "职责：根据用户目标、当前 contract 和 scout 提醒，给出更稳的章节推进建议。",
+      "只返回 JSON，不要 Markdown，不要解释。",
+      'JSON schema: {"summary":"一句话说明本章推进方式","narrativeMode":"推进|铺垫|转场|爆发|揭示|关系拉扯|混合","planSummary":"本章摘要","beats":["3到6条可执行节拍"],"mustKeep":["写作时必须保留的要点"],"mustMention":["本章必须照应的信息"],"mustUseSettings":["本章必须直接调用的设定"],"continuity":["必须承接的连续性提醒"],"forbidden":["本章不能发生的越界"],"endingMode":"natural|open|hook","endingNote":"结尾如何收束"}'
+    ].join("\n"),
+    userPrompt: [
+      sharedContext,
+      `\n\nScout 输出：\n${JSON.stringify(scout, null, 2)}`
+    ].join(""),
+    aiConfig,
+    temperature: 0.3
+  });
+  const architect = parseChapterArchitectPatch(architectRaw);
+
+  const reviewerRaw = await runSubAgentTextStage({
+    projectId: project.id,
+    chapterId: input.chapterId || "",
+    workflow,
+    stage: "subagents",
+    roleName: "continuity_reviewer",
+    systemPrompt: [
+      "你是章节生成流程中的 Continuity Reviewer。",
+      "职责：审查 scout 与 architect 的建议，保留最有价值的部分，避免过度模板化或引入新事实。",
+      "只返回 JSON，不要 Markdown，不要解释。",
+      'JSON schema: {"verdict":"accept|revise","summary":"一句话说明最终取舍","contractPatch":{"mustUseSettings":["可选"],"mustMention":["可选"],"continuity":["可选"],"forbidden":["可选"]},"planPatch":{"narrativeMode":"可选","summary":"可选","beats":["可选"],"mustKeep":["可选"],"mustMention":["可选"],"mustUseSettings":["可选"],"continuity":["可选"],"forbidden":["可选"],"endingMode":"natural|open|hook","endingNote":"可选"},"notes":["对主流程的补充提醒"]}'
+    ].join("\n"),
+    userPrompt: [
+      sharedContext,
+      `\n\nScout 输出：\n${JSON.stringify(scout, null, 2)}`,
+      `\n\nArchitect 输出：\n${JSON.stringify(architect, null, 2)}`
+    ].join(""),
+    aiConfig,
+    temperature: 0.2
+  });
+  const reviewer = parseChapterReviewerPatch(reviewerRaw);
+
+  const contractPatch = mergeWorkflowContract(
+    mergeWorkflowContract({}, scout.contractPatch),
+    reviewer.contractPatch
+  );
+  const planPatch = mergeWorkflowPlan(
+    mergeWorkflowPlan({}, architect.planPatch),
+    reviewer.planPatch
+  );
+  const trace = [
+    { role: "context_scout", output: scout },
+    { role: "beat_architect", output: architect },
+    { role: "continuity_reviewer", output: reviewer }
+  ];
+  const summaryText = summarizeSubAgentOutput({ scout, architect, reviewer });
+
+  await recordIoLog({
+    projectId: project.id,
+    chapterId: input.chapterId || "",
+    workflow,
+    stage: "subagents",
+    provider: aiConfig.provider,
+    model: aiConfig.model,
+    inputPayload: {
+      chapterNumber,
+      title,
+      useSubagents: true,
+      useMcp: input.useMcp === true
+    },
+    outputPayload: {
+      trace,
+      contractPatch,
+      planPatch,
+      summary: summaryText
+    },
+    outputText: summaryText
+  });
+
+  return {
+    scout,
+    architect,
+    reviewer,
+    contractPatch,
+    planPatch,
+    trace,
+    summaryText
+  };
+}
+
+function parseSubAgentListBlock(text, key) {
+  const parsed = parseJsonObject(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {
+      summary: "",
+      items: []
+    };
+  }
+
+  return {
+    summary: normalizeWorkflowText(parsed.summary, ""),
+    items: normalizeWorkflowList(parsed[key], [], 10)
+  };
+}
+
+function parseSubAgentObjectBlock(text, keys = []) {
+  const parsed = parseJsonObject(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { summary: "" };
+  }
+
+  const result = {
+    summary: normalizeWorkflowText(parsed.summary, "")
+  };
+
+  for (const key of keys) {
+    result[key] = normalizeWorkflowList(parsed[key], [], 10);
+  }
+
+  return result;
+}
+
+async function runSettingExtractionSubAgents({
+  project,
+  input,
+  workflow = "setting_extract",
+  aiConfig
+}) {
+  const sharedContext = [
+    `书名：${project.title}`,
+    `类型：${project.genre}`,
+    input.chapterTitle
+      ? `来源章节：第 ${input.chapterNumber || "?"} 章 ${input.chapterTitle}`
+      : `来源类型：${input.sourceMode === "chapter" ? "已有章节" : "外部文本"}`,
+    input.researchNotes ? `MCP 研究笔记：\n${input.researchNotes}` : "",
+    `已有设定库：\n${buildSettingsSummary(project) || "暂无设定"}`,
+    `原文：\n${input.source}`
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const scoutRaw = await runSubAgentTextStage({
+    projectId: project.id,
+    chapterId: input.chapterId || "",
+    workflow,
+    stage: "subagents",
+    roleName: "setting_scout",
+    systemPrompt: [
+      "你是 Setting Scout。",
+      "职责：只提炼原文里适合入库的稳定设定事实，不要编造，不要扩写剧情。",
+      "只返回 JSON。",
+      'JSON schema: {"summary":"一句话总结","stableFacts":["稳定设定事实"],"cautions":["不应误判为设定的内容"]}'
+    ].join("\n"),
+    userPrompt: sharedContext,
+    aiConfig,
+    temperature: 0.2
+  });
+  const scout = parseSubAgentObjectBlock(scoutRaw, ["stableFacts", "cautions"]);
+
+  const classifierRaw = await runSubAgentTextStage({
+    projectId: project.id,
+    chapterId: input.chapterId || "",
+    workflow,
+    stage: "subagents",
+    roleName: "setting_classifier",
+    systemPrompt: [
+      "你是 Setting Classifier。",
+      "职责：把 scout 提炼出的内容转成更适合抽取器消费的分类提示。",
+      "只返回 JSON。",
+      'JSON schema: {"summary":"一句话总结","characters":["角色类提示"],"world":["世界观类提示"],"locations":["地点类提示"],"items":["道具类提示"],"powers":["能力类提示"]}'
+    ].join("\n"),
+    userPrompt: `${sharedContext}\n\nScout 输出：\n${JSON.stringify(scout, null, 2)}`,
+    aiConfig,
+    temperature: 0.2
+  });
+  const classifier = parseSubAgentObjectBlock(classifierRaw, [
+    "characters",
+    "world",
+    "locations",
+    "items",
+    "powers"
+  ]);
+
+  const reviewerRaw = await runSubAgentTextStage({
+    projectId: project.id,
+    chapterId: input.chapterId || "",
+    workflow,
+    stage: "subagents",
+    roleName: "setting_reviewer",
+    systemPrompt: [
+      "你是 Setting Reviewer。",
+      "职责：审查前两位 agent 的判断，强调真正稳定、可入库、可去重的部分。",
+      "只返回 JSON。",
+      'JSON schema: {"summary":"一句话总结","libraryReady":["最适合入库的提示"],"reject":["容易误判的点"]}'
+    ].join("\n"),
+    userPrompt: [
+      sharedContext,
+      `\n\nScout 输出：\n${JSON.stringify(scout, null, 2)}`,
+      `\n\nClassifier 输出：\n${JSON.stringify(classifier, null, 2)}`
+    ].join(""),
+    aiConfig,
+    temperature: 0.2
+  });
+  const reviewer = parseSubAgentObjectBlock(reviewerRaw, ["libraryReady", "reject"]);
+
+  const summaryText = [
+    scout.summary ? `Scout：${scout.summary}` : "",
+    classifier.summary ? `Classifier：${classifier.summary}` : "",
+    reviewer.summary ? `Reviewer：${reviewer.summary}` : "",
+    scout.stableFacts?.length ? `稳定事实：${scout.stableFacts.join("；")}` : "",
+    classifier.characters?.length ? `角色提示：${classifier.characters.join("；")}` : "",
+    classifier.world?.length ? `世界提示：${classifier.world.join("；")}` : "",
+    classifier.locations?.length ? `地点提示：${classifier.locations.join("；")}` : "",
+    classifier.items?.length ? `道具提示：${classifier.items.join("；")}` : "",
+    classifier.powers?.length ? `能力提示：${classifier.powers.join("；")}` : "",
+    reviewer.libraryReady?.length ? `优先入库：${reviewer.libraryReady.join("；")}` : "",
+    reviewer.reject?.length ? `避免误判：${reviewer.reject.join("；")}` : "",
+    scout.cautions?.length ? `额外警告：${scout.cautions.join("；")}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  await recordIoLog({
+    projectId: project.id,
+    chapterId: input.chapterId || "",
+    workflow,
+    stage: "subagents",
+    provider: aiConfig.provider,
+    model: aiConfig.model,
+    inputPayload: {
+      useSubagents: true,
+      sourceMode: input.sourceMode
+    },
+    outputPayload: {
+      scout,
+      classifier,
+      reviewer
+    },
+    outputText: summaryText
+  });
+
+  return {
+    scout,
+    classifier,
+    reviewer,
+    summaryText
+  };
+}
+
+async function runTransformSubAgents({
+  project,
+  input,
+  workflow,
+  aiConfig
+}) {
+  const sharedContext = [
+    `书名：${project.title}`,
+    `类型：${project.genre}`,
+    `章节语气：${input.tone}`,
+    input.rewriteScope === "selection" ? "处理范围：局部片段" : "处理范围：整段文本",
+    input.mode === "modify" ? `修改要求：${input.instruction || "未指定"}` : `改写方向：${input.style || "未指定"}`,
+    `设定库：\n${buildSettingsSummary(project) || "暂无设定"}`,
+    `原文：\n${input.source}`
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const intentGuardRaw = await runSubAgentTextStage({
+    projectId: project.id,
+    chapterId: input.chapterId || "",
+    workflow,
+    stage: "subagents",
+    roleName: "intent_guard",
+    systemPrompt: [
+      "你是 Intent Guard。",
+      "职责：提炼这次润色/修改绝不能破坏的剧情事实、关系、设定和编辑意图。",
+      "只返回 JSON。",
+      'JSON schema: {"summary":"一句话总结","mustPreserve":["必须保留"],"forbidden":["不能发生"],"cautions":["高风险点"]}'
+    ].join("\n"),
+    userPrompt: sharedContext,
+    aiConfig,
+    temperature: 0.2
+  });
+  const intentGuard = parseSubAgentObjectBlock(intentGuardRaw, ["mustPreserve", "forbidden", "cautions"]);
+
+  const styleArchitectRaw = await runSubAgentTextStage({
+    projectId: project.id,
+    chapterId: input.chapterId || "",
+    workflow,
+    stage: "subagents",
+    roleName: "style_architect",
+    systemPrompt: [
+      "你是 Style Architect。",
+      "职责：给出更适合这次改写的表达策略，但不能改变事实。",
+      "只返回 JSON。",
+      'JSON schema: {"summary":"一句话总结","styleMoves":["表达策略"],"pacingMoves":["节奏策略"],"sentenceMoves":["句式策略"]}'
+    ].join("\n"),
+    userPrompt: `${sharedContext}\n\nIntent Guard 输出：\n${JSON.stringify(intentGuard, null, 2)}`,
+    aiConfig,
+    temperature: 0.3
+  });
+  const styleArchitect = parseSubAgentObjectBlock(styleArchitectRaw, [
+    "styleMoves",
+    "pacingMoves",
+    "sentenceMoves"
+  ]);
+
+  const continuityReviewerRaw = await runSubAgentTextStage({
+    projectId: project.id,
+    chapterId: input.chapterId || "",
+    workflow,
+    stage: "subagents",
+    roleName: "continuity_reviewer",
+    systemPrompt: [
+      "你是 Continuity Reviewer。",
+      "职责：从连续性和编辑风险角度，复核前两位 agent 的建议。",
+      "只返回 JSON。",
+      'JSON schema: {"summary":"一句话总结","keep":["应采纳的建议"],"avoid":["应避免的偏移"],"finalChecks":["落笔前检查项"]}'
+    ].join("\n"),
+    userPrompt: [
+      sharedContext,
+      `\n\nIntent Guard 输出：\n${JSON.stringify(intentGuard, null, 2)}`,
+      `\n\nStyle Architect 输出：\n${JSON.stringify(styleArchitect, null, 2)}`
+    ].join(""),
+    aiConfig,
+    temperature: 0.2
+  });
+  const continuityReviewer = parseSubAgentObjectBlock(continuityReviewerRaw, [
+    "keep",
+    "avoid",
+    "finalChecks"
+  ]);
+
+  const summaryText = [
+    intentGuard.summary ? `Intent Guard：${intentGuard.summary}` : "",
+    styleArchitect.summary ? `Style Architect：${styleArchitect.summary}` : "",
+    continuityReviewer.summary ? `Continuity Reviewer：${continuityReviewer.summary}` : "",
+    intentGuard.mustPreserve?.length ? `必须保留：${intentGuard.mustPreserve.join("；")}` : "",
+    intentGuard.forbidden?.length ? `禁止偏移：${intentGuard.forbidden.join("；")}` : "",
+    styleArchitect.styleMoves?.length ? `表达策略：${styleArchitect.styleMoves.join("；")}` : "",
+    styleArchitect.pacingMoves?.length ? `节奏策略：${styleArchitect.pacingMoves.join("；")}` : "",
+    styleArchitect.sentenceMoves?.length ? `句式策略：${styleArchitect.sentenceMoves.join("；")}` : "",
+    continuityReviewer.keep?.length ? `采纳建议：${continuityReviewer.keep.join("；")}` : "",
+    continuityReviewer.avoid?.length ? `避免事项：${continuityReviewer.avoid.join("；")}` : "",
+    continuityReviewer.finalChecks?.length ? `最终检查：${continuityReviewer.finalChecks.join("；")}` : "",
+    intentGuard.cautions?.length ? `高风险点：${intentGuard.cautions.join("；")}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  await recordIoLog({
+    projectId: project.id,
+    chapterId: input.chapterId || "",
+    workflow,
+    stage: "subagents",
+    provider: aiConfig.provider,
+    model: aiConfig.model,
+    inputPayload: {
+      useSubagents: true,
+      mode: input.mode,
+      rewriteScope: input.rewriteScope || "manual"
+    },
+    outputPayload: {
+      intentGuard,
+      styleArchitect,
+      continuityReviewer
+    },
+    outputText: summaryText
+  });
+
+  return {
+    intentGuard,
+    styleArchitect,
+    continuityReviewer,
+    summaryText
   };
 }
 
@@ -2693,10 +3413,49 @@ function buildWorkflowPreviewPayload({
 async function prepareChapterWorkflow(project, input, options = {}) {
   const runtime = options.runtime || null;
   const workflow = options.workflow || "chapter_generate";
-  const normalizedInput = buildNormalizedChapterInput(project, input);
+  let normalizedInput = buildNormalizedChapterInput(project, input);
   const chapterNumber = normalizedInput.chapterNumber;
   const title = normalizedInput.title;
   const previewChapterId = input.chapterId || "";
+  const aiConfig = options.aiConfig || (await resolveAiRuntimeConfig());
+
+  if (normalizedInput.useMcp) {
+    runtime?.stage("mcp_research", "running", {
+      message: "正在用 MCP tools 补充本章设定依据、连续性提醒与硬约束。"
+    });
+
+    const researchNotes = await buildChapterResearchNotes({
+      project,
+      input: normalizedInput,
+      chapterNumber,
+      title,
+      workflow,
+      aiConfig
+    });
+
+    if (researchNotes) {
+      normalizedInput = {
+        ...normalizedInput,
+        researchNotes
+      };
+      runtime?.stage("mcp_research", "done", {
+        message: `MCP research 已完成，补充 ${countTextUnits(researchNotes)} 字上下文。`,
+        meta: {
+          units: countTextUnits(researchNotes)
+        }
+      });
+    } else {
+      runtime?.stage("mcp_research", "skipped", {
+        message: isRemoteAiProvider(aiConfig.provider)
+          ? "MCP 未返回额外研究笔记，继续默认流程。"
+          : "当前 provider 不支持工具调用，跳过 MCP 研究。"
+      });
+    }
+  } else {
+    runtime?.stage("mcp_research", "skipped", {
+      message: "未开启 MCP 研究增强。"
+    });
+  }
 
   runtime?.stage("contract", "running", {
     message: "正在整理本章目标、设定与约束层。"
@@ -2704,6 +3463,47 @@ async function prepareChapterWorkflow(project, input, options = {}) {
 
   const baseContract = buildChapterContract(project, normalizedInput, chapterNumber, title);
   let contract = normalizeChapterContractDraft(baseContract, input.workflowDraft?.contract);
+  let subAgentPack = null;
+
+  if (normalizedInput.useSubagents && !input.workflowDraft) {
+    if (isRemoteAiProvider(aiConfig.provider)) {
+      runtime?.stage("subagents", "running", {
+        message: "子 agent team 正在拆解上下文、设计节拍并复核连续性。"
+      });
+      subAgentPack = await runChapterSubAgentOrchestration({
+        project,
+        input: normalizedInput,
+        chapterNumber,
+        title,
+        contract,
+        workflow,
+        aiConfig
+      });
+      contract = mergeWorkflowContract(contract, subAgentPack.contractPatch || {});
+      normalizedInput = {
+        ...normalizedInput,
+        researchNotes: [normalizedInput.researchNotes, subAgentPack.summaryText]
+          .filter((item) => String(item || "").trim())
+          .join("\n\n")
+      };
+      runtime?.stage("subagents", "done", {
+        message: subAgentPack.summaryText || "子 agent 编排已完成，结果已并回主流程。",
+        meta: {
+          traceCount: subAgentPack.trace?.length || 0
+        }
+      });
+    } else {
+      runtime?.stage("subagents", "skipped", {
+        message: "当前 provider 不支持远程多 agent 编排，跳过子 agent 流程。"
+      });
+    }
+  } else {
+    runtime?.stage("subagents", "skipped", {
+      message: normalizedInput.useSubagents
+        ? "检测到现成 workflowDraft，沿用已确认草案，不重复运行子 agent。"
+        : "未开启子 agent 编排。"
+    });
+  }
   runtime?.stage("contract", "done", {
     message: `已锁定第 ${chapterNumber} 章 contract。`,
     meta: {
@@ -2724,7 +3524,6 @@ async function prepareChapterWorkflow(project, input, options = {}) {
   });
 
   const fallbackPlan = buildFallbackChapterPlan(project, normalizedInput, chapterNumber, title, contract);
-  const aiConfig = options.aiConfig || (await resolveAiRuntimeConfig());
 
   let plan = normalizeChapterPlanDraft(fallbackPlan, input.workflowDraft?.plan);
   const shouldRunPlanner =
@@ -2758,6 +3557,10 @@ async function prepareChapterWorkflow(project, input, options = {}) {
 
   if (input.workflowDraft?.plan) {
     plan = normalizeChapterPlanDraft(plan, input.workflowDraft.plan);
+  }
+
+  if (subAgentPack?.planPatch && !input.workflowDraft?.plan) {
+    plan = mergeWorkflowPlan(plan, subAgentPack.planPatch);
   }
 
   runtime?.stage("planner", "done", {
@@ -2892,6 +3695,14 @@ function buildAiRequestPayload(messages, aiConfig, options = {}) {
     payload.stream = true;
   }
 
+  if (Array.isArray(options.tools) && options.tools.length) {
+    payload.tools = options.tools;
+  }
+
+  if (options.toolChoice) {
+    payload.tool_choice = options.toolChoice;
+  }
+
   return payload;
 }
 
@@ -2948,6 +3759,43 @@ async function callOpenAICompatible(messages, aiConfig, options = {}) {
   }
 
   return extractTextContent(payload.choices?.[0]?.message?.content);
+}
+
+async function callOpenAICompatibleRaw(messages, aiConfig, options = {}) {
+  const runtimeConfig = aiConfig || (await resolveAiRuntimeConfig());
+  const apiKey = runtimeConfig.apiKey;
+  const model = runtimeConfig.model;
+
+  if (!apiKey || !model) {
+    throw new Error("使用 AI 兼容接口需要配置 API Key 和模型");
+  }
+
+  const baseUrl = buildDefaultBaseUrl(runtimeConfig.provider, runtimeConfig.baseUrl, model);
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify(buildAiRequestPayload(messages, runtimeConfig, options))
+  });
+
+  const raw = await response.text();
+  let payload = null;
+  try {
+    payload = raw ? JSON.parse(raw) : {};
+  } catch (_error) {
+    payload = null;
+  }
+
+  if (!response.ok) {
+    throw new Error(payload?.error?.message || raw || "AI 服务请求失败");
+  }
+
+  return {
+    payload,
+    raw
+  };
 }
 
 async function* streamOpenAICompatible(messages, aiConfig, options = {}) {
@@ -3118,6 +3966,518 @@ async function runAiStageStream({
     });
     throw error;
   }
+}
+
+function sanitizeToolFunctionName(value, fallback = "mcp_tool") {
+  const next = String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return next || fallback;
+}
+
+function extractToolCallArguments(rawArguments) {
+  if (rawArguments && typeof rawArguments === "object") {
+    return rawArguments;
+  }
+  if (!rawArguments || typeof rawArguments !== "string") return {};
+  try {
+    const parsed = JSON.parse(rawArguments);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function clampToolPayloadString(value, maxLength = 4000) {
+  const text = String(value ?? "");
+  if (text.length <= maxLength) return text;
+  const omitted = text.length - maxLength;
+  return `${text.slice(0, maxLength)}\n...[truncated ${omitted} chars]`;
+}
+
+function summarizeToolPayload(value, options = {}) {
+  const {
+    maxStringLength = 4000,
+    maxArrayItems = 10,
+    maxObjectEntries = 20,
+    depth = 0,
+    maxDepth = 4
+  } = options;
+
+  if (value == null) return value;
+  if (typeof value === "string") return clampToolPayloadString(value, maxStringLength);
+  if (typeof value === "number" || typeof value === "boolean") return value;
+
+  if (depth >= maxDepth) {
+    return clampToolPayloadString(JSON.stringify(value), maxStringLength);
+  }
+
+  if (Array.isArray(value)) {
+    const items = value.slice(0, maxArrayItems).map((item) =>
+      summarizeToolPayload(item, {
+        maxStringLength,
+        maxArrayItems,
+        maxObjectEntries,
+        depth: depth + 1,
+        maxDepth
+      })
+    );
+    if (value.length > maxArrayItems) {
+      items.push(`[truncated ${value.length - maxArrayItems} more items]`);
+    }
+    return items;
+  }
+
+  if (typeof value === "object") {
+    const sourceEntries = Object.entries(value);
+    const summarized = {};
+    for (const [key, item] of sourceEntries.slice(0, maxObjectEntries)) {
+      summarized[key] = summarizeToolPayload(item, {
+        maxStringLength,
+        maxArrayItems,
+        maxObjectEntries,
+        depth: depth + 1,
+        maxDepth
+      });
+    }
+    if (sourceEntries.length > maxObjectEntries) {
+      summarized.__truncated__ = `${sourceEntries.length - maxObjectEntries} more fields omitted`;
+    }
+    return summarized;
+  }
+
+  return clampToolPayloadString(String(value), maxStringLength);
+}
+
+async function runMcpAgentLoop({
+  project,
+  task,
+  systemPrompt = "",
+  selectedServerIds = [],
+  workflow = "mcp_agent",
+  stage = "tool_loop",
+  persistLog = true
+}) {
+  const runtimeConfig = await resolveAiRuntimeConfig();
+  if (!isRemoteAiProvider(runtimeConfig.provider)) {
+    throw new Error("工具代理模式需要远程 AI Provider，本地 provider 暂不支持 tool calling");
+  }
+
+  const mcpState = await readMcpRuntimeState({ forceRefresh: true });
+  const readyServers = (mcpState.servers || []).filter((item) => item.status === "ready");
+  const allowedServers = selectedServerIds.length
+    ? readyServers.filter((item) => selectedServerIds.includes(item.id))
+    : readyServers;
+
+  if (!allowedServers.length) {
+    throw new Error("没有可用的 MCP server，请先在 Tools/MCP 页面完成配置并刷新探测");
+  }
+
+  const toolDefinitions = [];
+  const toolIndex = new Map();
+  for (const server of allowedServers) {
+    const tools = (mcpState.tools || []).filter((item) => item.serverId === server.id);
+    for (const tool of tools) {
+      const functionName = sanitizeToolFunctionName(
+        `mcp_${server.id}_${tool.name}_${toolDefinitions.length + 1}`,
+        `mcp_tool_${toolDefinitions.length + 1}`
+      );
+      toolDefinitions.push({
+        type: "function",
+        function: {
+          name: functionName,
+          description: `[${tool.serverName}] ${tool.name}${tool.description ? ` - ${tool.description}` : ""}`,
+          parameters:
+            tool.inputSchema && typeof tool.inputSchema === "object" && !Array.isArray(tool.inputSchema)
+              ? tool.inputSchema
+              : { type: "object", properties: {} }
+        }
+      });
+      toolIndex.set(functionName, {
+        serverId: tool.serverId,
+        serverName: tool.serverName,
+        toolName: tool.name
+      });
+    }
+  }
+
+  if (!toolDefinitions.length) {
+    throw new Error("已连接的 MCP server 没有暴露可调用 tools");
+  }
+
+  const messages = [
+    {
+      role: "system",
+      content: [
+        "You are a tool-using assistant inside AI Novel Studio.",
+        "Use MCP tools when they materially improve correctness or answer completeness.",
+        "If a tool returns useful data, incorporate it into the final answer directly.",
+        "Do not mention internal chain-of-thought. Keep the final answer concise and task-focused.",
+        systemPrompt ? `Additional system instruction:\n${systemPrompt}` : ""
+      ]
+        .filter(Boolean)
+        .join("\n\n")
+    },
+    {
+      role: "user",
+      content: [
+        `Project: ${project.title}`,
+        `Genre: ${project.genre}`,
+        `Premise: ${project.premise}`,
+        "",
+        `Task:\n${task}`
+      ].join("\n")
+    }
+  ];
+
+  const trace = [];
+  let finalText = "";
+
+  for (let round = 0; round < 6; round += 1) {
+    const { payload } = await callOpenAICompatibleRaw(messages, runtimeConfig, {
+      temperature: 0.2,
+      tools: toolDefinitions,
+      toolChoice: "auto"
+    });
+    const assistantMessage = payload?.choices?.[0]?.message || {};
+    const toolCalls = Array.isArray(assistantMessage?.tool_calls) ? assistantMessage.tool_calls : [];
+    const assistantContent = extractTextContent(assistantMessage?.content);
+
+    messages.push({
+      role: "assistant",
+      content: assistantMessage?.content ?? "",
+      tool_calls: toolCalls.length ? toolCalls : undefined
+    });
+
+    if (!toolCalls.length) {
+      finalText = assistantContent || "";
+      break;
+    }
+
+    for (const toolCall of toolCalls) {
+      const functionName = toolCall?.function?.name || "";
+      const target = toolIndex.get(functionName);
+      if (!target) {
+        const errorText = `Unknown tool requested: ${functionName}`;
+        trace.push({
+          round: round + 1,
+          toolCallId: toolCall?.id || "",
+          functionName,
+          error: errorText
+        });
+        messages.push({
+          role: "tool",
+          tool_call_id: toolCall?.id || "",
+          content: JSON.stringify({ error: errorText }, null, 2)
+        });
+        continue;
+      }
+
+      const args = extractToolCallArguments(toolCall?.function?.arguments);
+      try {
+        const toolResult = await callMcpTool({
+          serverId: target.serverId,
+          toolName: target.toolName,
+          arguments: args
+        });
+        const summarizedToolResult = summarizeToolPayload(toolResult.result);
+        trace.push({
+          round: round + 1,
+          toolCallId: toolCall?.id || "",
+          functionName,
+          serverId: target.serverId,
+          serverName: target.serverName,
+          toolName: target.toolName,
+          arguments: args,
+          result: summarizedToolResult
+        });
+        messages.push({
+          role: "tool",
+          tool_call_id: toolCall?.id || "",
+          content: JSON.stringify(summarizedToolResult, null, 2)
+        });
+      } catch (error) {
+        const errorText = error.message || "Tool execution failed";
+        trace.push({
+          round: round + 1,
+          toolCallId: toolCall?.id || "",
+          functionName,
+          serverId: target.serverId,
+          serverName: target.serverName,
+          toolName: target.toolName,
+          arguments: args,
+          error: errorText
+        });
+        messages.push({
+          role: "tool",
+          tool_call_id: toolCall?.id || "",
+          content: JSON.stringify({ error: errorText }, null, 2)
+        });
+      }
+    }
+  }
+
+  if (!finalText) {
+    finalText = "工具调用轮次已达到上限，未生成最终回答。";
+  }
+
+  if (persistLog) {
+    await recordIoLog({
+      projectId: project.id,
+      workflow,
+      stage,
+      provider: runtimeConfig.provider,
+      model: runtimeConfig.model,
+      inputPayload: {
+        task,
+        systemPrompt,
+        selectedServerIds,
+        toolCount: toolDefinitions.length
+      },
+      outputPayload: {
+        trace,
+        finalText
+      },
+      outputText: finalText
+    });
+  }
+
+  return {
+    finalText,
+    trace,
+    selectedServerIds: allowedServers.map((item) => item.id),
+    toolCount: toolDefinitions.length
+  };
+}
+
+async function runHumanizePass({
+  project,
+  sourceText,
+  tone,
+  workflow,
+  stage = "humanize",
+  chapterId = "",
+  aiConfig,
+  pipeline = "chapter_final",
+  headingLine = "",
+  style = "",
+  instruction = ""
+}) {
+  const originalContent = String(sourceText || "").trim();
+  if (!originalContent) {
+    return {
+      content: "",
+      humanize: {
+        enabled: normalizeHumanizeEnabled(project?.humanizeEnabled, true),
+        applied: false,
+        skillId: "",
+        skillName: "",
+        mode: "zh",
+        originalContent: "",
+        humanizedContent: "",
+        reviewContent: ""
+      }
+    };
+  }
+
+  if (!normalizeHumanizeEnabled(project?.humanizeEnabled, true)) {
+    return {
+      content: originalContent,
+      humanize: {
+        enabled: false,
+        applied: false,
+        skillId: "",
+        skillName: "",
+        mode: getHumanizeMode(originalContent),
+        originalContent,
+        humanizedContent: originalContent,
+        reviewContent: originalContent
+      }
+    };
+  }
+
+  const catalog = await readSkillCatalog();
+  const skill = pickHumanizerSkill(catalog, originalContent, project?.humanizeSkillId || "");
+  const mode = getHumanizeMode(originalContent);
+  const runtimeConfig = aiConfig || (await resolveAiRuntimeConfig());
+  const messages = buildHumanizeMessages({
+    project,
+    settingsSummary: buildSettingsSummary(project),
+    input: {
+      source: originalContent,
+      tone: normalizeTone(tone, project.defaultTone),
+      pipeline,
+      headingLine,
+      style,
+      instruction
+    },
+    skillName: skill?.name || "",
+    skillPrompt: buildHumanizerSkillPrompt(skill, { mode, pipeline })
+  });
+
+  let humanizedContent = originalContent;
+
+  if (isRemoteAiProvider(runtimeConfig.provider)) {
+    const result = await runAiStage({
+      projectId: project.id,
+      chapterId,
+      workflow,
+      stage,
+      messages,
+      temperature: 0.35,
+      aiConfig: runtimeConfig
+    });
+    humanizedContent = String(result || "").trim() || originalContent;
+  } else {
+    humanizedContent = applyLocalHumanizer(originalContent, mode) || originalContent;
+    await recordIoLog({
+      projectId: project.id,
+      chapterId,
+      workflow,
+      stage: `${stage}-local`,
+      inputPayload: {
+        tone,
+        pipeline,
+        skillId: skill?.id || "",
+        skillName: skill?.name || "",
+        sourceLength: countTextUnits(originalContent)
+      },
+      outputText: humanizedContent
+    });
+  }
+
+  return {
+    content: humanizedContent,
+    humanize: {
+      enabled: true,
+      applied: humanizedContent !== originalContent,
+      skillId: skill?.id || "",
+      skillName: skill?.name || "",
+      mode,
+      originalContent,
+      humanizedContent,
+      reviewContent: humanizedContent
+    }
+  };
+}
+
+async function runHumanizePassStream({
+  project,
+  sourceText,
+  tone,
+  workflow,
+  stage = "humanize",
+  chapterId = "",
+  aiConfig,
+  pipeline = "transform_final",
+  headingLine = "",
+  style = "",
+  instruction = "",
+  onDelta
+}) {
+  const originalContent = String(sourceText || "").trim();
+  if (!originalContent) {
+    return {
+      content: "",
+      humanize: {
+        enabled: normalizeHumanizeEnabled(project?.humanizeEnabled, true),
+        applied: false,
+        skillId: "",
+        skillName: "",
+        mode: "zh",
+        originalContent: "",
+        humanizedContent: "",
+        reviewContent: ""
+      }
+    };
+  }
+
+  if (!normalizeHumanizeEnabled(project?.humanizeEnabled, true)) {
+    return {
+      content: originalContent,
+      humanize: {
+        enabled: false,
+        applied: false,
+        skillId: "",
+        skillName: "",
+        mode: getHumanizeMode(originalContent),
+        originalContent,
+        humanizedContent: originalContent,
+        reviewContent: originalContent
+      }
+    };
+  }
+
+  const catalog = await readSkillCatalog();
+  const skill = pickHumanizerSkill(catalog, originalContent, project?.humanizeSkillId || "");
+  const mode = getHumanizeMode(originalContent);
+  const runtimeConfig = aiConfig || (await resolveAiRuntimeConfig());
+  const messages = buildHumanizeMessages({
+    project,
+    settingsSummary: buildSettingsSummary(project),
+    input: {
+      source: originalContent,
+      tone: normalizeTone(tone, project.defaultTone),
+      pipeline,
+      headingLine,
+      style,
+      instruction
+    },
+    skillName: skill?.name || "",
+    skillPrompt: buildHumanizerSkillPrompt(skill, { mode, pipeline })
+  });
+
+  let humanizedContent = "";
+
+  if (isRemoteAiProvider(runtimeConfig.provider)) {
+    humanizedContent = await runAiStageStream({
+      projectId: project.id,
+      chapterId,
+      workflow,
+      stage,
+      messages,
+      temperature: 0.35,
+      aiConfig: runtimeConfig,
+      onDelta
+    });
+  } else {
+    const localResult = applyLocalHumanizer(originalContent, mode) || originalContent;
+    for (const chunk of chunkTextForStream(localResult)) {
+      humanizedContent += chunk;
+      await onDelta?.(chunk, humanizedContent);
+    }
+    await recordIoLog({
+      projectId: project.id,
+      chapterId,
+      workflow,
+      stage: `${stage}-local-stream`,
+      inputPayload: {
+        tone,
+        pipeline,
+        skillId: skill?.id || "",
+        skillName: skill?.name || "",
+        sourceLength: countTextUnits(originalContent)
+      },
+      outputText: localResult
+    });
+    humanizedContent = localResult;
+  }
+
+  const finalText = String(humanizedContent || "").trim() || originalContent;
+  return {
+    content: finalText,
+    humanize: {
+      enabled: true,
+      applied: finalText !== originalContent,
+      skillId: skill?.id || "",
+      skillName: skill?.name || "",
+      mode,
+      originalContent,
+      humanizedContent: finalText,
+      reviewContent: finalText
+    }
+  };
 }
 
 async function generateChapter(project, input, options = {}) {
@@ -3292,6 +4652,62 @@ async function generateChapter(project, input, options = {}) {
     });
   }
 
+  let humanizeResult = {
+    content: finalContent,
+    humanize: {
+      enabled: normalizeHumanizeEnabled(project?.humanizeEnabled, true),
+      applied: false,
+      skillId: "",
+      skillName: "",
+      mode: getHumanizeMode(finalContent),
+      originalContent: finalContent,
+      humanizedContent: finalContent,
+      reviewContent: finalContent
+    }
+  };
+
+  runtime?.stage("humanize", "running", {
+    message: normalizeHumanizeEnabled(project?.humanizeEnabled, true)
+      ? "正在做最终去 AI 味润色。"
+      : "项目已关闭最终去 AI 味步骤。"
+  });
+  humanizeResult = await runHumanizePass({
+    project,
+    sourceText: finalContent,
+    tone: normalizedInput.tone,
+    workflow,
+    stage: "humanize",
+    chapterId: input.chapterId || "",
+    aiConfig,
+    pipeline: "chapter_final",
+    headingLine: buildChapterHeading(chapterNumber, title)
+  });
+  finalContent = normalizeGeneratedChapterContent(humanizeResult.content, chapterNumber, title);
+  humanizeResult = {
+    ...humanizeResult,
+    content: finalContent,
+    humanize: {
+      ...humanizeResult.humanize,
+      applied: finalContent !== humanizeResult.humanize.originalContent,
+      humanizedContent: finalContent,
+      reviewContent: finalContent
+    }
+  };
+  runtime?.stage(
+    "humanize",
+    humanizeResult.humanize.enabled ? "done" : "skipped",
+    {
+      message: humanizeResult.humanize.enabled
+        ? `最终稿已完成去 AI 味处理，当前 ${countTextUnits(finalContent)} 字。`
+        : "默认流程直接沿用 Repair / Writer 结果。",
+      meta: {
+        applied: humanizeResult.humanize.applied,
+        units: countTextUnits(finalContent),
+        skillName: humanizeResult.humanize.skillName || ""
+      }
+    }
+  );
+
   runtime?.snapshot({
     generationWorkflow: buildLiveGenerationWorkflowSnapshot({
       chapterId: workflowChapterId,
@@ -3304,6 +4720,7 @@ async function generateChapter(project, input, options = {}) {
       writerContent: normalizedWriterContent,
       reviewContent: finalContent,
       repaired,
+      humanize: humanizeResult.humanize,
       sessionType,
       targetMode
     })
@@ -3318,6 +4735,8 @@ async function generateChapter(project, input, options = {}) {
     preflightGuard,
     postGuard,
     repaired,
+    humanize: humanizeResult.humanize,
+    reviewContent: finalContent,
     title,
     chapterNumber
   };
@@ -3457,13 +4876,51 @@ function chunkTextForStream(text, size = 140) {
 async function transformText(project, input) {
   const mode = normalizeTransformMode(input.mode);
   const tone = normalizeTone(input.tone, project.defaultTone);
-  const normalizedInput = { ...input, mode, tone };
+  const normalizedInputBase = {
+    ...input,
+    mode,
+    tone,
+    useSubagents: input.useSubagents === true,
+    researchNotes: String(input.researchNotes || "").trim()
+  };
   const aiConfig = await resolveAiRuntimeConfig();
   const workflow = mode === "modify" ? "modify" : "rewrite";
   const stage = mode === "modify" ? "modify" : "rewrite";
+  let normalizedInput = normalizedInputBase;
+  let transformed = "";
+
+  if (normalizedInput.useSubagents && isRemoteAiProvider(aiConfig.provider)) {
+    try {
+      const subAgentPass = await runTransformSubAgents({
+        project,
+        input: normalizedInput,
+        workflow,
+        aiConfig
+      });
+      normalizedInput = {
+        ...normalizedInput,
+        researchNotes: [normalizedInput.researchNotes, subAgentPass.summaryText]
+          .filter((item) => String(item || "").trim())
+          .join("\n\n")
+      };
+    } catch (error) {
+      await recordIoLog({
+        projectId: project.id,
+        chapterId: input.chapterId || "",
+        workflow,
+        stage: "subagents",
+        status: "error",
+        inputPayload: {
+          useSubagents: true,
+          mode
+        },
+        outputText: error.message || "Sub-agent orchestration failed"
+      });
+    }
+  }
 
   if (isRemoteAiProvider(aiConfig.provider)) {
-    return runAiStage({
+    transformed = await runAiStage({
       projectId: project.id,
       chapterId: input.chapterId || "",
       workflow,
@@ -3476,32 +4933,82 @@ async function transformText(project, input) {
       temperature: mode === "modify" ? 0.45 : 0.7,
       aiConfig
     });
+  } else {
+    transformed = mode === "modify" ? buildLocalModifyText(normalizedInput) : buildLocalPolishText(normalizedInput);
+
+    await recordIoLog({
+      projectId: project.id,
+      chapterId: input.chapterId || "",
+      workflow,
+      stage: "local",
+      inputPayload: normalizedInput,
+      outputText: transformed
+    });
   }
 
-  const result = mode === "modify" ? buildLocalModifyText(normalizedInput) : buildLocalPolishText(normalizedInput);
-
-  await recordIoLog({
-    projectId: project.id,
-    chapterId: input.chapterId || "",
+  const humanized = await runHumanizePass({
+    project,
+    sourceText: transformed,
+    tone,
     workflow,
-    stage: "local",
-    inputPayload: normalizedInput,
-    outputText: result
+    stage: "humanize",
+    chapterId: input.chapterId || "",
+    aiConfig,
+    pipeline: "transform_final",
+    style: normalizedInput.style || "",
+    instruction: normalizedInput.instruction || ""
   });
 
-  return result;
+  return humanized.content;
 }
 
 async function streamTransformText(project, input, onDelta) {
   const mode = normalizeTransformMode(input.mode);
   const tone = normalizeTone(input.tone, project.defaultTone);
-  const normalizedInput = { ...input, mode, tone };
+  const normalizedInputBase = {
+    ...input,
+    mode,
+    tone,
+    useSubagents: input.useSubagents === true,
+    researchNotes: String(input.researchNotes || "").trim()
+  };
   const aiConfig = await resolveAiRuntimeConfig();
   const workflow = mode === "modify" ? "modify" : "rewrite";
   const stage = mode === "modify" ? "modify" : "rewrite";
+  let normalizedInput = normalizedInputBase;
+
+  if (normalizedInput.useSubagents && isRemoteAiProvider(aiConfig.provider)) {
+    try {
+      const subAgentPass = await runTransformSubAgents({
+        project,
+        input: normalizedInput,
+        workflow,
+        aiConfig
+      });
+      normalizedInput = {
+        ...normalizedInput,
+        researchNotes: [normalizedInput.researchNotes, subAgentPass.summaryText]
+          .filter((item) => String(item || "").trim())
+          .join("\n\n")
+      };
+    } catch (error) {
+      await recordIoLog({
+        projectId: project.id,
+        chapterId: input.chapterId || "",
+        workflow,
+        stage: "subagents",
+        status: "error",
+        inputPayload: {
+          useSubagents: true,
+          mode
+        },
+        outputText: error.message || "Sub-agent orchestration failed"
+      });
+    }
+  }
 
   if (isRemoteAiProvider(aiConfig.provider)) {
-    return runAiStageStream({
+    const transformed = await runAiStage({
       projectId: project.id,
       chapterId: input.chapterId || "",
       workflow,
@@ -3512,17 +5019,26 @@ async function streamTransformText(project, input, onDelta) {
         input: normalizedInput
       }),
       temperature: mode === "modify" ? 0.45 : 0.7,
+      aiConfig
+    });
+
+    const humanized = await runHumanizePassStream({
+      project,
+      sourceText: transformed,
+      tone,
+      workflow,
+      stage: "humanize",
+      chapterId: input.chapterId || "",
       aiConfig,
+      pipeline: "transform_final",
+      style: normalizedInput.style || "",
+      instruction: normalizedInput.instruction || "",
       onDelta
     });
+    return humanized.content;
   }
 
   const result = mode === "modify" ? buildLocalModifyText(normalizedInput) : buildLocalPolishText(normalizedInput);
-  let outputText = "";
-  for (const chunk of chunkTextForStream(result)) {
-    outputText += chunk;
-    await onDelta?.(chunk, outputText);
-  }
   await recordIoLog({
     projectId: project.id,
     chapterId: input.chapterId || "",
@@ -3531,7 +5047,21 @@ async function streamTransformText(project, input, onDelta) {
     inputPayload: normalizedInput,
     outputText: result
   });
-  return result;
+
+  const humanized = await runHumanizePassStream({
+    project,
+    sourceText: result,
+    tone,
+    workflow,
+    stage: "humanize",
+    chapterId: input.chapterId || "",
+    aiConfig,
+    pipeline: "transform_final",
+    style: normalizedInput.style || "",
+    instruction: normalizedInput.instruction || "",
+    onDelta
+  });
+  return humanized.content;
 }
 
 async function rewriteText(project, input) {
@@ -3554,18 +5084,21 @@ function writeSseEvent(response, payload) {
 }
 
 const workflowRuntimeStageDefinitions = {
-  preview: ["contract", "planner", "guard_preflight"],
-  generate: ["contract", "planner", "guard_preflight", "writer", "guard", "repair", "review_session"],
-  regenerate: ["contract", "planner", "guard_preflight", "writer", "guard", "repair", "review_session"]
+  preview: ["mcp_research", "subagents", "contract", "planner", "guard_preflight"],
+  generate: ["mcp_research", "subagents", "contract", "planner", "guard_preflight", "writer", "guard", "repair", "humanize", "review_session"],
+  regenerate: ["mcp_research", "subagents", "contract", "planner", "guard_preflight", "writer", "guard", "repair", "humanize", "review_session"]
 };
 
 const workflowRuntimeStageLabels = {
+  mcp_research: "MCP Research",
+  subagents: "Sub-agent Team",
   contract: "Contract",
   planner: "Planner",
   guard_preflight: "Preflight Guard",
   writer: "Writer",
   guard: "Post Guard",
   repair: "Repair",
+  humanize: "Humanize",
   review_session: "Review Session"
 };
 
@@ -3690,7 +5223,12 @@ async function extractSettings(project, input) {
   const normalizedInput = {
     ...input,
     sourceMode: input.sourceMode === "chapter" ? "chapter" : "manual",
-    source: String(input.source || "").trim()
+    source: String(input.source || "").trim(),
+    useMcp: input.useMcp === true,
+    useSubagents: input.useSubagents === true,
+    selectedServerIds: Array.isArray(input.selectedServerIds)
+      ? input.selectedServerIds.map((item) => String(item || "").trim()).filter(Boolean)
+      : []
   };
 
   if (!normalizedInput.source) {
@@ -3698,6 +5236,73 @@ async function extractSettings(project, input) {
   }
 
   const aiConfig = await resolveAiRuntimeConfig();
+  let researchNotes = "";
+
+  if (normalizedInput.useMcp && isRemoteAiProvider(aiConfig.provider)) {
+    try {
+      const researchPass = await runMcpAgentLoop({
+        project,
+        task: [
+          "请先用可用的 MCP tools 辅助理解下面这段文本，并整理出对“设定抽取”真正有帮助的补充说明。",
+          "重点只保留：人物身份、稳定关系、世界规则、地点属性、道具/能力的明确限制、可直接入库的别名或证据。",
+          "不要改写原文，不要编造事实，不要输出闲聊，只输出一段精炼研究笔记。",
+          "",
+          normalizedInput.chapterTitle
+            ? `来源章节：第 ${normalizedInput.chapterNumber || "?"} 章 ${normalizedInput.chapterTitle}`
+            : "来源类型：外部文本",
+          `原文：\n${normalizedInput.source}`
+        ].join("\n"),
+        systemPrompt: "Only use tools when they add concrete evidence or structure for extracting stable story settings.",
+        selectedServerIds: normalizedInput.selectedServerIds,
+        workflow: "setting_extract",
+        stage: "mcp_research",
+        persistLog: true
+      });
+      researchNotes = String(researchPass.finalText || "").trim();
+    } catch (error) {
+      await recordIoLog({
+        projectId: project.id,
+        chapterId: input.chapterId || "",
+        workflow: "setting_extract",
+        stage: "mcp_research",
+        status: "error",
+        inputPayload: {
+          useMcp: true,
+          selectedServerIds: normalizedInput.selectedServerIds
+        },
+        outputText: error.message || "MCP research failed"
+      });
+    }
+  }
+
+  if (normalizedInput.useSubagents && isRemoteAiProvider(aiConfig.provider)) {
+    try {
+      const subAgentPass = await runSettingExtractionSubAgents({
+        project,
+        input: {
+          ...normalizedInput,
+          researchNotes
+        },
+        workflow: "setting_extract",
+        aiConfig
+      });
+      researchNotes = [researchNotes, subAgentPass.summaryText]
+        .filter((item) => String(item || "").trim())
+        .join("\n\n");
+    } catch (error) {
+      await recordIoLog({
+        projectId: project.id,
+        chapterId: input.chapterId || "",
+        workflow: "setting_extract",
+        stage: "subagents",
+        status: "error",
+        inputPayload: {
+          useSubagents: true
+        },
+        outputText: error.message || "Sub-agent orchestration failed"
+      });
+    }
+  }
 
   if (isRemoteAiProvider(aiConfig.provider)) {
     const raw = await runAiStage({
@@ -3708,7 +5313,10 @@ async function extractSettings(project, input) {
       messages: buildSettingExtractionMessages({
         project,
         settingsSummary: buildSettingsSummary(project),
-        input: normalizedInput
+        input: {
+          ...normalizedInput,
+          researchNotes
+        }
       }),
       temperature: 0.35,
       aiConfig
@@ -3740,7 +5348,10 @@ async function extractSettings(project, input) {
     chapterId: input.chapterId || "",
     workflow: "setting_extract",
     stage: "local",
-    inputPayload: normalizedInput,
+    inputPayload: {
+      ...normalizedInput,
+      researchNotes
+    },
     outputPayload: result
   });
   return result;
@@ -3890,7 +5501,15 @@ function buildGenerationWorkflowResult({
   pendingReview = false
 }) {
   const writerContent = String(generated.writerContent || generated.content || "").trim();
-  const repairedContent = String(generated.content || "").trim();
+  const repairedContent = String(
+    generated.humanize?.enabled
+      ? generated.humanize.originalContent || generated.content || ""
+      : generated.content || ""
+  ).trim();
+  const reviewContent = String(
+    generated.reviewContent || generated.humanize?.reviewContent || repairedContent || writerContent
+  ).trim();
+  const humanize = generated.humanize || null;
 
   return {
     sessionId,
@@ -3907,9 +5526,10 @@ function buildGenerationWorkflowResult({
       applied: Boolean(generated.repaired),
       originalContent: writerContent,
       repairedContent,
-      reviewContent: repairedContent || writerContent,
+      reviewContent,
       repairPlan: normalizeWorkflowList(generated.postGuard?.repairPlan, [], 6)
-    }
+    },
+    humanize
   };
 }
 
@@ -3924,6 +5544,7 @@ function buildLiveGenerationWorkflowSnapshot({
   writerContent = "",
   reviewContent = "",
   repaired = false,
+  humanize = null,
   sessionType = "generate",
   targetMode = "next"
 }) {
@@ -3939,7 +5560,9 @@ function buildLiveGenerationWorkflowSnapshot({
         postGuard,
         writerContent,
         content: reviewContent || writerContent,
-        repaired
+        repaired,
+        humanize,
+        reviewContent: reviewContent || writerContent
       },
       sessionType,
       targetMode,
@@ -4535,8 +6158,70 @@ app.get("/api/projects/:projectId/chapters/:chapterId/export", async (request, r
   }
 });
 
+app.post("/api/mcp/servers", async (request, response, next) => {
+  try {
+    await saveMcpServerConfig({
+      servers: Array.isArray(request.body?.servers) ? request.body.servers : []
+    });
+    response.json(await readData());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/mcp/refresh", async (_request, response, next) => {
+  try {
+    await readMcpRuntimeState({ forceRefresh: true });
+    response.json(await readData());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/mcp/tools/call", async (request, response, next) => {
+  try {
+    const mcpToolCall = await callMcpTool({
+      serverId: String(request.body?.serverId || "").trim(),
+      toolName: String(request.body?.toolName || "").trim(),
+      arguments:
+        request.body?.arguments && typeof request.body.arguments === "object" && !Array.isArray(request.body.arguments)
+          ? request.body.arguments
+          : {}
+    });
+    response.json({
+      ...(await readData()),
+      mcpToolCall
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/projects/:projectId/mcp/agent-run", async (request, response, next) => {
+  try {
+    const project = await readProject(request.params.projectId);
+    const mcpAgentRun = await runMcpAgentLoop({
+      project,
+      task: String(request.body?.task || "").trim(),
+      systemPrompt: String(request.body?.systemPrompt || "").trim(),
+      selectedServerIds: Array.isArray(request.body?.selectedServerIds)
+        ? request.body.selectedServerIds.map((item) => String(item || "").trim()).filter(Boolean)
+        : []
+    });
+    response.json({
+      ...(await readData()),
+      mcpAgentRun
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/projects", async (request, response, next) => {
   try {
+    const catalog = await readSkillCatalog();
+    const requestedSkillId = String(request.body.humanizeSkillId || "").trim();
+    const resolvedSkillId = catalog.some((item) => item.id === requestedSkillId) ? requestedSkillId : "";
     const project = {
       id: id("project"),
       title: request.body.title?.trim() || "未命名小说",
@@ -4545,13 +6230,16 @@ app.post("/api/projects", async (request, response, next) => {
       targetAudience: request.body.targetAudience?.trim() || "",
       status: "筹备中",
       defaultTone: normalizeTone(request.body.defaultTone, "热血"),
+      humanizeEnabled: normalizeHumanizeEnabled(request.body.humanizeEnabled, true),
+      humanizeSkillId: resolvedSkillId,
       createdAt: now()
     };
 
     await pool.query(
       `INSERT INTO projects (
-        id, title, genre, premise, target_audience, status, default_tone, created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        id, title, genre, premise, target_audience, status, default_tone,
+        humanize_enabled, humanize_skill_id, created_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         project.id,
         project.title,
@@ -4560,6 +6248,8 @@ app.post("/api/projects", async (request, response, next) => {
         project.targetAudience,
         project.status,
         project.defaultTone,
+        project.humanizeEnabled,
+        project.humanizeSkillId,
         project.createdAt
       ]
     );
@@ -4572,11 +6262,23 @@ app.post("/api/projects", async (request, response, next) => {
 
 app.post("/api/projects/:projectId/preferences", async (request, response, next) => {
   try {
-    await readProject(request.params.projectId);
-    await pool.query("UPDATE projects SET default_tone = $1 WHERE id = $2", [
-      normalizeTone(request.body.defaultTone, "热血"),
-      request.params.projectId
-    ]);
+    const project = await readProject(request.params.projectId);
+    const catalog = await readSkillCatalog();
+    const requestedSkillId = String(request.body.humanizeSkillId ?? project.humanizeSkillId ?? "").trim();
+    const resolvedSkillId = catalog.some((item) => item.id === requestedSkillId) ? requestedSkillId : "";
+    await pool.query(
+      `UPDATE projects
+       SET default_tone = $1,
+           humanize_enabled = $2,
+           humanize_skill_id = $3
+       WHERE id = $4`,
+      [
+        normalizeTone(request.body.defaultTone, project.defaultTone || "热血"),
+        normalizeHumanizeEnabled(request.body.humanizeEnabled, project.humanizeEnabled !== false),
+        resolvedSkillId,
+        request.params.projectId
+      ]
+    );
     response.json(await readData());
   } catch (error) {
     next(error);
@@ -4664,7 +6366,10 @@ app.post("/api/projects/:projectId/settings/extract", async (request, response, 
       source,
       chapterId: chapter?.id || "",
       chapterNumber: chapter?.number,
-      chapterTitle: chapter?.title || ""
+      chapterTitle: chapter?.title || "",
+      useMcp: request.body.useMcp === true,
+      useSubagents: request.body.useSubagents === true,
+      selectedServerIds: Array.isArray(request.body.selectedServerIds) ? request.body.selectedServerIds : []
     });
 
     response.json({ ...(await readData()), extractionResult });

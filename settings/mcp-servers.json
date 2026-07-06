@@ -1,0 +1,17 @@
+{
+  "servers": [
+    {
+      "id": "filesystem",
+      "name": "Filesystem",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "D:\\aproj_python\\ai_novel"
+      ],
+      "cwd": "D:\\aproj_python\\ai_novel",
+      "enabled": true,
+      "env": {}
+    }
+  ]
+}
